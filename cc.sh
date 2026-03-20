@@ -1074,7 +1074,7 @@ main() {
             ;;
           q|quit) echo "退出"; exit 0 ;;
           "")
-            # 直接回车：使用当前配置的供应商
+            # 直接回车：使用当前配置的供应商，沿用上次模型
             local current_url
             current_url=$(python3 -c "
 import json
@@ -1091,17 +1091,8 @@ print(d.get('env', {}).get('ANTHROPIC_BASE_URL', ''))
                 fi
               done
               if [[ -n "$current_num" ]]; then
-                _gum_log info "使用当前供应商：$current_num"
+                _gum_log info "使用当前供应商：$current_num (沿用当前模型)"
                 _cleanup_bg_test
-                if [[ -z "$CUSTOM_MODEL" && -t 0 ]]; then
-                  local entry
-                  entry=$(_find_provider "$current_num") || {
-                    _gum_log error "无法找到当前供应商"
-                    continue
-                  }
-                  _parse_provider "$entry"
-                  ask_for_model "$P_NAME" || continue
-                fi
                 switch_provider "$current_num"
                 break
               else

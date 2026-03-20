@@ -1075,11 +1075,12 @@ main() {
           q|quit) echo "退出"; exit 0 ;;
           "")
             # 直接回车：使用当前配置的供应商，沿用上次模型
-            local current_url
-            current_url=$(python3 -c "
+            local current_url current_model
+            read -r current_url current_model < <(python3 -c "
 import json
 d = json.load(open('$CLAUDE_SETTINGS'))
-print(d.get('env', {}).get('ANTHROPIC_BASE_URL', ''))
+env = d.get('env', {})
+print(env.get('ANTHROPIC_BASE_URL', ''), env.get('ANTHROPIC_MODEL', ''))
 " 2>/dev/null)
             if [[ -n "$current_url" ]]; then
               local current_num=""
@@ -1091,7 +1092,9 @@ print(d.get('env', {}).get('ANTHROPIC_BASE_URL', ''))
                 fi
               done
               if [[ -n "$current_num" ]]; then
-                _gum_log info "使用当前供应商：$current_num (沿用当前模型)"
+                # 设置 CUSTOM_MODEL 为当前模型，这样 generate_config 会使用它
+                CUSTOM_MODEL="$current_model"
+                _gum_log info "使用当前供应商：$current_num (模型：$current_model)"
                 _cleanup_bg_test
                 switch_provider "$current_num"
                 break

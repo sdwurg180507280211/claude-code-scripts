@@ -906,6 +906,7 @@ print(d.get('env', {}).get('ANTHROPIC_BASE_URL', ''))
   printf "  %bv)%b 功能验证 (工具调用/模型一致性)\n" "$YELLOW" "$NC"
   printf "  %bm)%b 模型列表 (查询供应商可用模型)\n" "$YELLOW" "$NC"
   printf "  %bq)%b 退出\n" "$RED" "$NC"
+  printf "  %b[回车]%b 使用当前供应商重新启动\n" "$DIM" "$NC"
   echo ""
 }
 
@@ -1037,7 +1038,7 @@ main() {
       show_status
       while true; do
         show_menu
-        read -p "请输入选项 (0-${PROVIDER_COUNT}/v/m/q): " choice
+        read -p "请输入选项 (0-${PROVIDER_COUNT}/v/m/q/回车=当前): " choice
         case "$choice" in
           0)
             run_speed_test
@@ -1072,6 +1073,44 @@ main() {
             run_list_models "$mnum"
             ;;
           q|quit) echo "退出"; exit 0 ;;
+          "")
+            # 直接回车：使用当前配置的供应商
+            local current_url
+            current_url=$(python3 -c "
+import json
+d = json.load(open('$CLAUDE_SETTINGS'))
+print(d.get('env', {}).get('ANTHROPIC_BASE_URL', ''))
+" 2>/dev/null)
+            if [[ -n "$current_url" ]]; then
+              local current_num=""
+              for entry in "${PROVIDERS[@]}"; do
+                _parse_provider "$entry"
+                if [[ "$current_url" == "$P_URL" ]]; then
+                  current_num="$P_NUM"
+                  break
+                fi
+              done
+              if [[ -n "$current_num" ]]; then
+                _gum_log info "使用当前供应商：$current_num"
+                _cleanup_bg_test
+                if [[ -z "$CUSTOM_MODEL" && -t 0 ]]; then
+                  local entry
+                  entry=$(_find_provider "$current_num") || {
+                    _gum_log error "无法找到当前供应商"
+                    continue
+                  }
+                  _parse_provider "$entry"
+                  ask_for_model "$P_NAME" || continue
+                fi
+                switch_provider "$current_num"
+                break
+              else
+                _gum_log warn "未找到当前 URL 对应的供应商"
+              fi
+            else
+              _gum_log error "无法读取当前配置"
+            fi
+            ;;
           *) _gum_log error "无效选项" ;;
         esac
       done

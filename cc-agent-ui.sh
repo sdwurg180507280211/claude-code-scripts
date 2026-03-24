@@ -134,7 +134,7 @@ get_vendors_from_ccsh() {
         # 匹配 "数字|名称|..." 格式的行
         if [[ "$line" =~ ^[[:space:]]*\"[0-9]+\| ]]; then
             # 提取编号和名称
-            local num=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+            local num=$(echo "$line" | grep -oE '[0-9]+' | head -1 || true)
             local name=$(echo "$line" | cut -d'|' -f2 | tr -d '"')
             if [[ -n "$num" && -n "$name" ]]; then
                 arr+=("$num|$name")
@@ -322,7 +322,7 @@ menu_stop_agent() {
 
         local i=1
         for name in "${agents[@]}"; do
-            local pid=$(cat "$PID_DIR/$name.pid" 2>/dev/null)
+            local pid=$(cat "$PID_DIR/$name.pid" 2>/dev/null || true)
             printf "  %d) %-20s (PID: %s)\n" "$i" "$name" "$pid"
             ((i++))
         done

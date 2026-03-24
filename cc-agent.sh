@@ -46,7 +46,7 @@ get_vendor_info() {
     local cc_script="${SCRIPT_DIR}/cc.sh"
     [[ ! -f "$cc_script" ]] && cc_script="$HOME/cc.sh"
     [[ ! -f "$cc_script" ]] && cc_script="./cc.sh"
-    grep -E "^[[:space:]]*\"$num\|" "$cc_script" 2>/dev/null | head -1
+    grep -E "^[[:space:]]*\"$num\|" "$cc_script" 2>/dev/null | head -1 || true
 }
 
 # 生成唯一的 Session ID
@@ -86,7 +86,7 @@ create_agent() {
     # 解析供应商数据
     # 格式: "编号|名称|URL|Token|模型|..."
     local v_num v_name v_url v_token v_model
-    v_num=$(echo "$vendor_line" | grep -oE '[0-9]+' | head -1)
+    v_num=$(echo "$vendor_line" | grep -oE '[0-9]+' | head -1 || true)
     v_name=$(echo "$vendor_line" | cut -d'|' -f2 | tr -d '"')
     v_url=$(echo "$vendor_line" | cut -d'|' -f3 | tr -d '"')
     v_token=$(echo "$vendor_line" | cut -d'|' -f4 | tr -d '"')
@@ -284,7 +284,7 @@ stop_agent() {
     echo "停止 Agent '$name' (PID: $pid)..."
 
     # 先尝试优雅停止
-    kill "$pid" 2>/dev/null
+    kill "$pid" 2>/dev/null || true
     local count=0
     while kill -0 "$pid" 2>/dev/null && [[ $count -lt 10 ]]; do
         sleep 0.5
@@ -294,7 +294,7 @@ stop_agent() {
     # 如果还在运行，强制停止
     if kill -0 "$pid" 2>/dev/null; then
         echo "强制停止..."
-        kill -9 "$pid" 2>/dev/null
+        kill -9 "$pid" 2>/dev/null || true
         sleep 0.5
     fi
 
@@ -328,7 +328,7 @@ show_status() {
 
         # 检查运行状态
         if [[ -f "$pid_file" ]]; then
-            local pid=$(cat "$pid_file" 2>/dev/null)
+            local pid=$(cat "$pid_file" 2>/dev/null || true)
             if kill -0 "$pid" 2>/dev/null; then
                 echo -e "  状态: ${GREEN}运行中${NC} (PID: $pid)"
                 ((running++))
@@ -409,7 +409,7 @@ remove_agent() {
     # 如果正在运行，先停止
     local pid_file="$PID_DIR/$name.pid"
     if [[ -f "$pid_file" ]]; then
-        local pid=$(cat "$pid_file" 2>/dev/null)
+        local pid=$(cat "$pid_file" 2>/dev/null || true)
         if kill -0 "$pid" 2>/dev/null; then
             echo "停止运行中的 Agent '$name'..."
             stop_agent "$name"

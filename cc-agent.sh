@@ -352,7 +352,6 @@ try:
 except:
     pass
 EOF
-        exit 0
         } < /dev/null 2>/dev/null || true
 
         echo "  日志: $log_file"

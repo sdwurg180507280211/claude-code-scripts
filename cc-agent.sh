@@ -155,7 +155,7 @@ settings = {
         "ANTHROPIC_SMALL_FAST_MODEL": vendor.get("default_model", model),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
     },
-    "model": model.split('-')[0] if '-' in model else model,
+    "model": model.split('-')[0] if model.startswith('claude-') else model,
     "skipDangerousModePermissionPrompt": True
 }
 

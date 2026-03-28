@@ -15,6 +15,9 @@
 set -e
 set -o pipefail
 
+# 安全设置：确保新建文件权限严格
+umask 0077
+
 # 配置目录
 AGENTS_DIR="$HOME/.claude/agents"
 PID_DIR="$AGENTS_DIR/pids"
@@ -37,6 +40,8 @@ fi
 # 初始化目录
 init_dirs() {
     mkdir -p "$AGENTS_DIR" "$PID_DIR" "$LOG_DIR"
+    # 确保目录权限严格，防止其他用户遍历
+    chmod 700 "$AGENTS_DIR" "$PID_DIR" "$LOG_DIR"
 }
 
 # 从 cc.sh 获取供应商信息
@@ -65,6 +70,13 @@ create_agent() {
 
     if [[ -z "$name" || -z "$vendor_num" ]]; then
         echo "用法: $0 create <name> <vendor_num> [model]"
+        exit 1
+    fi
+
+    # 安全验证：Agent 名称只能包含字母、数字、下划线、连字符
+    # 防止路径遍历攻击
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "${RED}错误: Agent 名称只能包含字母、数字、下划线(_)和连字符(-)${NC}"
         exit 1
     fi
 
@@ -116,6 +128,9 @@ create_agent() {
 }
 EOF
 
+    # 确保权限严格：只有所有者可读写
+    chmod 600 "$AGENTS_DIR/$name.json"
+
     echo -e "${GREEN}✓ Agent '$name' 创建成功${NC}"
     echo "  供应商: $v_name"
     echo "  模型: $final_model"
@@ -155,7 +170,7 @@ settings = {
         "ANTHROPIC_SMALL_FAST_MODEL": vendor.get("default_model", model),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
     },
-    "model": model.split('-')[0] if model.startswith('claude-') else model,
+    "model": model.split('-')[0] if model.startswith('claude-') else "claude",
     "skipDangerousModePermissionPrompt": True
 }
 

@@ -11,6 +11,9 @@
 set -e
 set -o pipefail
 
+# 安全设置：确保新建文件权限严格
+umask 0077
+
 # 依赖检查
 for cmd in python3 perl curl; do
   command -v "$cmd" &>/dev/null || {
@@ -48,24 +51,22 @@ NC='\033[0m'
 # ── 供应商数据 (唯一数据源) ──
 # 格式: 编号|名称|URL|Token|模型|haiku模型|sonnet模型|small_fast模型
 # haiku/sonnet/small_fast 留空则与主模型相同
-PROVIDERS=(
-  # ── newcli 系列 (共用 token) ──
-  "1|newcli/super (Super 特价)|https://code.newcli.com/claude/super|sk-ant-oat01-II5Pqj8w3LkOqYbsXVeil1kg-8xkYflCtjZafD833B6imrsfQ4M-dG-iJIPSB_4WgGYdYerqvdnYh-Zr47y_d8pOMKEXQAA|claude-opus-4-6|||"
-  "2|newcli/ultra (Ultra 特价)|https://code.newcli.com/claude/ultra|sk-ant-oat01-II5Pqj8w3LkOqYbsXVeil1kg-8xkYflCtjZafD833B6imrsfQ4M-dG-iJIPSB_4WgGYdYerqvdnYh-Zr47y_d8pOMKEXQAA|claude-opus-4-6|||"
-  "3|newcli/droid (AWS 思考)|https://code.newcli.com/claude/droid|sk-ant-oat01-II5Pqj8w3LkOqYbsXVeil1kg-8xkYflCtjZafD833B6imrsfQ4M-dG-iJIPSB_4WgGYdYerqvdnYh-Zr47y_d8pOMKEXQAA|claude-opus-4-6|||"
-  "4|newcli/aws (AWS 特价)|https://code.newcli.com/claude/aws|sk-ant-oat01-II5Pqj8w3LkOqYbsXVeil1kg-8xkYflCtjZafD833B6imrsfQ4M-dG-iJIPSB_4WgGYdYerqvdnYh-Zr47y_d8pOMKEXQAA|claude-opus-4-6|||"
-  # ── 独立 Claude 中转 ──
-  "5|PuCode (pucode.com)|https://api.pucode.com|sk-hqhrgEo8zJXKaBFzQWIn3GShov9nDj9rWBpunCcCtXUtT9GC|claude-opus-4-6|claude-haiku-4-5-20251001|claude-sonnet-4-6|claude-haiku-4-5-20251001"
-  "6|AiCoding (aicoding.sh)|https://api.aicoding.sh|aicoding-53023984484a878506ec4082938d6b2e|claude-opus-4-6|||"
-  "7|中转站 (zhongzhuan.win)|https://api.zhongzhuan.win/v1|sk-lcTMEbXxAhrP27hpcdBNf8eSxCWNw6ENuEzaZ34IDHJ53oHV|claude-opus-4-6|||"
-  # ── 非 Claude 模型 ──
-  "8|LinkAPI (GPT-5.4)|https://api.linkapi.ai|sk-7NoV0BobP08hph5PrQormauliECHLOJU7NPFSSU8RMbidBza|gpt-5.4|gpt-5-mini|gpt-5.2|gpt-5-mini"
-  "9|VPSAIRobot (GPT-5.4)|https://vpsairobot.com|sk-1de1ee2bc81e2be00a1bbf68e2563c056bb1156a89637dea963276a0b451350b|gpt-5.4|||"
-  "10|Kimi K2.5 (moonshot.cn)|https://api.moonshot.cn/anthropic|sk-FFU1liXk77GS2vRXBI6AXNY3r4ObaS0oVCbyLeAdrpAG4vsA|kimi-k2.5|||"
-  "11|阿里云 Coding (qwen3.5-plus)|https://coding.dashscope.aliyuncs.com/apps/anthropic|sk-sp-bfa0853dbd634cb1a3779bc17cfd94bf|qwen3.5-plus|||"
-  # ── 火山方舟 ──
-  "12|火山方舟 (ark.cn-beijing.volces.com)|https://ark.cn-beijing.volces.com/api/coding|89a15d24-e885-4382-8687-7f1dcca9701b|doubao-seed-2.0-code|||"
-)
+
+# 配置文件路径
+API_KEYS_CONF="$(dirname "${BASH_SOURCE[0]}")/api-keys.conf"
+
+# 从配置文件加载供应商数据
+PROVIDERS=()
+if [[ -f "$API_KEYS_CONF" ]]; then
+  while IFS= read -r line; do
+    # 跳过空行和注释
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    PROVIDERS+=("$line")
+  done < "$API_KEYS_CONF"
+else
+  echo "错误: 配置文件不存在: $API_KEYS_CONF" >&2
+  exit 1
+fi
 
 PROVIDER_COUNT=${#PROVIDERS[@]}
 TEST_TIMEOUT=8
@@ -849,6 +850,7 @@ backup_config() {
   local timestamp=$(date +%Y%m%d_%H%M%S)
   local backup_file="$BACKUP_DIR/settings.json.backup.${timestamp}.$$"
   cp "$CLAUDE_SETTINGS" "$backup_file"
+  chmod 600 "$backup_file"
   _gum_log info "配置已备份到：${backup_file}"
 
   # 只保留最近 N 份备份
@@ -886,10 +888,13 @@ switch_provider() {
     latest_backup=$(ls -1t "$BACKUP_DIR"/settings.json.backup.* 2>/dev/null | head -1)
     if [[ -n "$latest_backup" ]]; then
       cp "$latest_backup" "$CLAUDE_SETTINGS"
+      chmod 600 "$CLAUDE_SETTINGS"
       _gum_log info "已恢复到之前的配置"
     fi
     return 1
   fi
+  # 确保权限严格：只有所有者可读写
+  chmod 600 "$CLAUDE_SETTINGS"
 
   _gum_log info "✓ 配置已更新!"
   echo ""
@@ -921,36 +926,36 @@ show_menu() {
   printf "%b【分类选择】%b\n" "$CYAN" "$NC"
   echo ""
 
-  # ── newcli 系列
-  printf "  %b▸ newcli 系列%b (共用 token，不同端点)\n" "$BLUE" "$NC"
+  # ── Claude 中转
+  printf "  %b▸ Claude 中转%b (共用 token)\n" "$BLUE" "$NC"
   for entry in "${PROVIDERS[@]:0:4}"; do
     _parse_provider "$entry"
     if [[ "$current_url" == "$P_URL" ]]; then
-      printf "    %b[%s]%b %b%s%b %b● 当前%b\n" "$GREEN" "$P_NUM" "$NC" "$YELLOW" "$P_NAME" "$NC" "$DIM" "$NC"
+      printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
     else
       printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
     fi
   done
   echo ""
 
-  # ── Claude 中转
-  printf "  %b▸ Claude 中转%b (独立供应商)\n" "$BLUE" "$NC"
-  for entry in "${PROVIDERS[@]:4:3}"; do
+  # ── GPT 模型
+  printf "  %b▸ GPT 模型%b (独立供应商)\n" "$BLUE" "$NC"
+  for entry in "${PROVIDERS[@]:4:2}"; do
     _parse_provider "$entry"
     if [[ "$current_url" == "$P_URL" ]]; then
-      printf "    %b[%s]%b %b%s%b %b● 当前%b\n" "$GREEN" "$P_NUM" "$NC" "$YELLOW" "$P_NAME" "$NC" "$DIM" "$NC"
+      printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
     else
       printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
     fi
   done
   echo ""
 
-  # ── 非 Claude 模型
-  printf "  %b▸ 其他模型%b (GPT / Kimi / Qwen / 火山)\n" "$BLUE" "$NC"
-  for entry in "${PROVIDERS[@]:7}"; do
+  # ── 其他模型
+  printf "  %b▸ 其他模型%b (Kimi / Qwen / 火山)\n" "$BLUE" "$NC"
+  for entry in "${PROVIDERS[@]:6}"; do
     _parse_provider "$entry"
     if [[ "$current_url" == "$P_URL" ]]; then
-      printf "    %b[%s]%b %b%s%b %b● 当前%b\n" "$GREEN" "$P_NUM" "$NC" "$YELLOW" "$P_NAME" "$NC" "$DIM" "$NC"
+      printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
     else
       printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
     fi
@@ -962,8 +967,8 @@ show_menu() {
   printf "  %b【功能选项】%b\n" "$CYAN" "$NC"
   echo ""
   printf "    %b0%b) ⚡ 速度测试          %bv%b) 🔍 功能验证\n" "$YELLOW" "$NC" "$YELLOW" "$NC"
-  printf "    %bm%b) 📋 模型列表          %bq%b) 退出\n" "$YELLOW" "$NC" "$RED" "$NC"
-  printf "    %b[回车]%b 使用当前配置重启\n" "$DIM" "$NC"
+  printf "    %bm%b) 📋 模型列表          %be%b) ✏️ 编辑 API Key\n" "$YELLOW" "$NC" "$YELLOW" "$NC"
+  printf "    %bq%b) 退出                %b[↵]%b 使用当前配置重启\n" "$RED" "$NC" "$DIM" "$NC"
   echo ""
 }
 
@@ -972,153 +977,293 @@ ask_for_model() {
   local provider_num="$1"
   local provider_name="$2"
 
-  # 尝试获取在线模型列表
-  local models_raw
-  models_raw=$(fetch_models "$provider_num" 2>/dev/null)
-
-  local -a models=()
-  local claude_models=() gpt_models=() other_models=()
-
-  if [[ -n "$models_raw" ]]; then
-    IFS='|' read -ra models <<< "$models_raw"
-    # 分类模型
-    for m in "${models[@]}"; do
-      [[ -z "$m" ]] && continue
-      if [[ "$m" == claude-* ]]; then
-        claude_models+=("$m")
-      elif [[ "$m" == gpt-* || "$m" == o1-* || "$m" == o3-* ]]; then
-        gpt_models+=("$m")
-      else
-        other_models+=("$m")
-      fi
-    done
-  fi
-
   echo ""
   printf "%b┌─────────────────────────────────────────────────────┐%b\n" "$CYAN" "$NC"
   printf "%b│  供应商：%s%b\n" "$BLUE" "$provider_name" "$NC"
   printf "%b└─────────────────────────────────────────────────────┘%b\n" "$CYAN" "$NC"
   echo ""
 
-  if [[ ${#models[@]} -gt 0 ]]; then
-    printf "  %b✓ 已获取在线模型列表 (共 %d 个)%b\n\n" "$GREEN" "${#models[@]}" "$NC"
+  # 根据供应商类型设置默认模型
+  local actual_default="$DEFAULT_MODEL"
+  if [[ "$provider_name" == newcli/* ]]; then
+      actual_default="claude-opus-4-6"
+  elif [[ "$provider_name" == *"PuCode"* || "$provider_name" == *"LinkAPI"* ]]; then
+      actual_default="gpt-5.4"
+  elif [[ "$provider_name" == *"阿里云"* ]]; then
+      actual_default="qwen3.5-plus"
+  elif [[ "$provider_name" == *"火山方舟"* ]]; then
+      actual_default="ark-code-latest"
+  fi
 
-    local option=1
-    local -a model_options=()
+  printf "  请选择模型 %b[默认：%s]%b:\n" "$DIM" "$actual_default" "$NC"
+  echo ""
 
-    # 显示 Claude 系列
-    if [[ ${#claude_models[@]} -gt 0 ]]; then
-      printf "  %b▸ Claude 系列:%b\n" "$BLUE" "$NC"
-      for m in "${claude_models[@]}"; do
-        printf "    %b%d)%b %s\n" "$YELLOW" "$option" "$NC" "$m"
-        model_options+=("$m")
-        ((option++))
-      done
+  # Kimi 只支持 kimi-k2.5，直接使用，不需要选择
+  if [[ "$provider_name" == *"Kimi"* ]]; then
+      CUSTOM_MODEL="kimi-k2.5"
+      printf "使用模型：%bkimi-k2.5%b (Kimi 只支持此模型)\n" "$GREEN" "$NC"
       echo ""
-    fi
-
-    # 显示 GPT 系列
-    if [[ ${#gpt_models[@]} -gt 0 ]]; then
-      printf "  %b▸ GPT/OpenAI 系列:%b\n" "$BLUE" "$NC"
-      for m in "${gpt_models[@]}"; do
-        printf "    %b%d)%b %s\n" "$YELLOW" "$option" "$NC" "$m"
-        model_options+=("$m")
-        ((option++))
-      done
+  # 火山方舟供应商 - 显示专属模型列表
+  elif [[ "$provider_name" == *"火山方舟"* ]]; then
+      printf "    %b1) ark-code-latest        (最新代码专用) ● 当前%b\n" "$RED" "$NC"
+      echo "    2) doubao-seed-2.0-code  (豆码 代码专用)"
+      echo "    3) doubao-seed-2.0-pro   (豆码 专业版)"
+      echo "    4) doubao-seed-2.0-lite  (豆码 轻量版)"
+      echo "    5) doubao-seed-code       (豆码 旧版)"
+      echo "    6) minimax-m2.5           (MiniMax)"
+      echo "    7) glm-4.7                (智谱 GLM)"
+      echo "    8) deepseek-v3.2          (DeepSeek)"
+      echo "    9) kimi-k2.5              (Kimi)"
+      echo "    0) 手动输入模型名称"
+      echo "    b) 返回主菜单"
       echo ""
-    fi
+      read -p "  输入选项 (1-9/0/b/↵): " model_choice
 
-    # 显示其他模型
-    if [[ ${#other_models[@]} -gt 0 ]]; then
-      printf "  %b▸ 其他模型:%b\n" "$BLUE" "$NC"
-      for m in "${other_models[@]}"; do
-        printf "    %b%d)%b %s\n" "$YELLOW" "$option" "$NC" "$m"
-        model_options+=("$m")
-        ((option++))
-      done
-      echo ""
-    fi
-
-    printf "  %b▸ 其他选项:%b\n" "$BLUE" "$NC"
-    printf "    %b0)%b 手动输入模型名称\n" "$YELLOW" "$NC"
-    printf "    %bq)%b 返回主菜单\n" "$RED" "$NC"
-    echo ""
-
-    read -p "  输入选项 (1-$((option-1))/0/q/回车): " model_choice
-
-    case "$model_choice" in
-      q|Q)
-        printf "%b已取消%b\n" "$YELLOW" "$NC"
-        echo ""
-        return 1
-        ;;
-      0)
-        read -p "请输入模型名称： " CUSTOM_MODEL
-        ;;
-      "")
-        CUSTOM_MODEL=""
-        ;;
-      *)
-        if [[ "$model_choice" =~ ^[0-9]+$ ]] && [[ "$model_choice" -ge 1 ]] && [[ "$model_choice" -lt "$option" ]]; then
-          CUSTOM_MODEL="${model_options[$((model_choice-1))]}"
-          printf "已选择：%b%s%b\n" "$GREEN" "$CUSTOM_MODEL" "$NC"
-        else
+      case "$model_choice" in
+        1) CUSTOM_MODEL="ark-code-latest" ;;
+        2) CUSTOM_MODEL="doubao-seed-2.0-code" ;;
+        3) CUSTOM_MODEL="doubao-seed-2.0-pro" ;;
+        4) CUSTOM_MODEL="doubao-seed-2.0-lite" ;;
+        5) CUSTOM_MODEL="doubao-seed-code" ;;
+        6) CUSTOM_MODEL="minimax-m2.5" ;;
+        7) CUSTOM_MODEL="glm-4.7" ;;
+        8) CUSTOM_MODEL="deepseek-v3.2" ;;
+        9) CUSTOM_MODEL="kimi-k2.5" ;;
+        0)
+          read -p "请输入模型名称： " CUSTOM_MODEL
+          ;;
+        b|B)
+          printf "%b已取消%b\n" "$YELLOW" "$NC"
+          echo ""
+          return 1
+          ;;
+        "")
+          CUSTOM_MODEL=""
+          ;;
+        *)
           printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
           CUSTOM_MODEL=""
-        fi
-        ;;
-    esac
-  else
-    # 无法获取在线列表，使用备用静态菜单
-    printf "  %b⚠ 无法获取在线模型列表，显示备用菜单%b\n\n" "$YELLOW" "$NC"
-    printf "  请选择模型 %b[回车默认：%s]%b:\n" "$DIM" "$DEFAULT_MODEL" "$NC"
-    echo ""
-    echo "    1) claude-opus-4-6      (最强)"
-    echo "    2) claude-sonnet-4-6    (均衡)"
-    echo "    3) claude-haiku-4-5     (快速)"
-    echo "    4) gpt-5.4              (GPT 主模型)"
-    echo "    5) gpt-5.2              (GPT 均衡)"
-    echo "    6) gpt-5-mini           (GPT 快速)"
-    echo "    7) qwen3.5-plus         (通义千问)"
-    echo "    8) kimi-k2.5            (Kimi)"
-    echo "    9) 手动输入模型名称"
-    echo "    b) 返回主菜单"
-    echo ""
-    read -p "  输入选项 (1-9/b/回车): " model_choice
+          ;;
+      esac
+  # Claude 中转 (newcli 系列) - 只显示 Claude 模型
+  elif [[ "$provider_name" == newcli/* ]]; then
+      printf "    %b1) claude-opus-4-6      (最强) ● 当前%b\n" "$RED" "$NC"
+      echo "    2) claude-sonnet-4-6    (均衡)"
+      echo "    3) claude-haiku-4-5     (快速)"
+      echo "    4) 手动输入模型名称"
+      echo "    b) 返回主菜单"
+      echo ""
+      read -p "  输入选项 (1-4/b/↵): " model_choice
 
-    case "$model_choice" in
-      1) CUSTOM_MODEL="claude-opus-4-6" ;;
-      2) CUSTOM_MODEL="claude-sonnet-4-6" ;;
-      3) CUSTOM_MODEL="claude-haiku-4-5-20251001" ;;
-      4) CUSTOM_MODEL="gpt-5.4" ;;
-      5) CUSTOM_MODEL="gpt-5.2" ;;
-      6) CUSTOM_MODEL="gpt-5-mini" ;;
-      7) CUSTOM_MODEL="qwen3.5-plus" ;;
-      8) CUSTOM_MODEL="kimi-k2.5" ;;
-      9)
-        read -p "请输入模型名称： " CUSTOM_MODEL
-        ;;
-      b|B)
-        printf "%b已取消%b\n" "$YELLOW" "$NC"
-        echo ""
-        return 1
-        ;;
-      "")
-        CUSTOM_MODEL=""
-        ;;
-      *)
-        printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-        CUSTOM_MODEL=""
-        ;;
-    esac
-  fi
+      case "$model_choice" in
+        1) CUSTOM_MODEL="claude-opus-4-6" ;;
+        2) CUSTOM_MODEL="claude-sonnet-4-6" ;;
+        3) CUSTOM_MODEL="claude-haiku-4-5-20251001" ;;
+        4)
+          read -p "请输入模型名称： " CUSTOM_MODEL
+          ;;
+        b|B)
+          printf "%b已取消%b\n" "$YELLOW" "$NC"
+          echo ""
+          return 1
+          ;;
+        "")
+          CUSTOM_MODEL=""
+          ;;
+        *)
+          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
+          CUSTOM_MODEL=""
+          ;;
+      esac
+  # GPT 系列 (PuCode, LinkAPI) - 只显示 GPT 模型
+  elif [[ "$provider_name" == *"PuCode"* || "$provider_name" == *"LinkAPI"* ]]; then
+      printf "    %b1) gpt-5.4              (GPT 主模型) ● 当前%b\n" "$RED" "$NC"
+      echo "    2) gpt-5.2              (GPT 均衡)"
+      echo "    3) gpt-5-mini           (GPT 快速)"
+      echo "    4) 手动输入模型名称"
+      echo "    b) 返回主菜单"
+      echo ""
+      read -p "  输入选项 (1-4/b/↵): " model_choice
+
+      case "$model_choice" in
+        1) CUSTOM_MODEL="gpt-5.4" ;;
+        2) CUSTOM_MODEL="gpt-5.2" ;;
+        3) CUSTOM_MODEL="gpt-5-mini" ;;
+        4)
+          read -p "请输入模型名称： " CUSTOM_MODEL
+          ;;
+        b|B)
+          printf "%b已取消%b\n" "$YELLOW" "$NC"
+          echo ""
+          return 1
+          ;;
+        "")
+          CUSTOM_MODEL=""
+          ;;
+        *)
+          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
+          CUSTOM_MODEL=""
+          ;;
+      esac
+  else
+      # 其他模型 - 通用菜单
+      if [[ "$provider_name" == *"阿里云"* ]]; then
+        echo "    1) claude-opus-4-6      (最强)"
+        echo "    2) claude-sonnet-4-6    (均衡)"
+        echo "    3) claude-haiku-4-5     (快速)"
+        echo "    4) gpt-5.4              (GPT 主模型)"
+        echo "    5) gpt-5.2              (GPT 均衡)"
+        echo "    6) gpt-5-mini           (GPT 快速)"
+        printf "    %b7) qwen3.5-plus         (通义千问) ● 当前%b\n" "$RED" "$NC"
+        echo "    8) kimi-k2.5            (Kimi)"
+        echo "    9) 手动输入模型名称"
+      else
+        printf "    %b1) claude-opus-4-6      (最强) ● 当前%b\n" "$RED" "$NC"
+        echo "    2) claude-sonnet-4-6    (均衡)"
+        echo "    3) claude-haiku-4-5     (快速)"
+        echo "    4) gpt-5.4              (GPT 主模型)"
+        echo "    5) gpt-5.2              (GPT 均衡)"
+        echo "    6) gpt-5-mini           (GPT 快速)"
+        echo "    7) qwen3.5-plus         (通义千问)"
+        echo "    8) kimi-k2.5            (Kimi)"
+        echo "    9) 手动输入模型名称"
+      fi
+      echo "    b) 返回主菜单"
+      echo ""
+      read -p "  输入选项 (1-9/b/↵): " model_choice
+
+      case "$model_choice" in
+        1) CUSTOM_MODEL="claude-opus-4-6" ;;
+        2) CUSTOM_MODEL="claude-sonnet-4-6" ;;
+        3) CUSTOM_MODEL="claude-haiku-4-5-20251001" ;;
+        4) CUSTOM_MODEL="gpt-5.4" ;;
+        5) CUSTOM_MODEL="gpt-5.2" ;;
+        6) CUSTOM_MODEL="gpt-5-mini" ;;
+        7) CUSTOM_MODEL="qwen3.5-plus" ;;
+        8) CUSTOM_MODEL="kimi-k2.5" ;;
+        9)
+          read -p "请输入模型名称： " CUSTOM_MODEL
+          ;;
+        b|B)
+          printf "%b已取消%b\n" "$YELLOW" "$NC"
+          echo ""
+          return 1
+          ;;
+        "")
+          CUSTOM_MODEL=""
+          ;;
+        *)
+          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
+          CUSTOM_MODEL=""
+          ;;
+      esac
+    fi
 
   if [[ -n "$CUSTOM_MODEL" ]]; then
     printf "使用模型：%b%s%b\n" "$GREEN" "$CUSTOM_MODEL" "$NC"
   else
-    printf "使用默认模型：%b%s%b\n" "$GREEN" "$DEFAULT_MODEL" "$NC"
+    CUSTOM_MODEL="$actual_default"
+    printf "使用默认模型：%b%s%b\n" "$GREEN" "$CUSTOM_MODEL" "$NC"
   fi
   echo ""
+}
+
+# ── 编辑供应商 Token ──
+edit_provider_token() {
+  echo ""
+  _gum_header "✏️ 编辑供应商 API Key"
+  echo ""
+
+  # 列出所有供应商供选择
+  local count=0
+  for entry in "${PROVIDERS[@]}"; do
+    _parse_provider "$entry"
+    printf "  [%s] %s\n" "$P_NUM" "$P_NAME"
+    : $((count++))
+  done
+  echo ""
+
+  read -p "请输入要编辑的供应商编号 (1-$count): " edit_num
+
+  # 验证输入是否为有效数字
+  if [[ ! "$edit_num" =~ ^[0-9]+$ ]] || [[ "$edit_num" -lt 1 ]] || [[ "$edit_num" -gt "$count" ]]; then
+    _gum_log error "无效的供应商编号"
+    echo ""
+    return 1
+  fi
+
+  # 找到对应的供应商
+  local target_entry=""
+  for entry in "${PROVIDERS[@]}"; do
+    _parse_provider "$entry"
+    if [[ "$P_NUM" == "$edit_num" ]]; then
+      target_entry="$entry"
+      break
+    fi
+  done
+
+  if [[ -z "$target_entry" ]]; then
+    _gum_log error "找不到该供应商"
+    echo ""
+    return 1
+  fi
+
+  _parse_provider "$target_entry"
+
+  echo ""
+  echo " 当前供应商: $P_NAME"
+  echo " 当前 API Key: ${P_TOKEN:0:20}...${P_TOKEN: -20}"
+  echo ""
+  read -p "请输入新的 API Key: " new_token
+
+  if [[ -z "$new_token" ]]; then
+    _gum_log error "API Key 不能为空"
+    echo ""
+    return 1
+  fi
+
+  # 脚本路径
+  local script_path="${BASH_SOURCE[0]}"
+  if [[ ! -w "$script_path" ]]; then
+    _gum_log error "脚本文件 $script_path 不可写，请手动编辑修改"
+    echo ""
+    return 1
+  fi
+
+  # 使用 sed 替换这一行
+  # 格式: "编号|名称|URL|Token|模型|..."
+  # 需要保留原有分隔符，只替换 Token 字段
+  local old_line="$target_entry"
+  # 移除开头的空格和引号
+  old_line=$(echo "$old_line" | sed 's/^[[:space:]]*"//; s/"$//')
+
+  # 按 | 分割，替换第四段
+  local n name url _ model haiku sonnet small
+  IFS='|' read -r n name url _ model haiku sonnet small <<< "$old_line"
+
+  # 重新构建行
+  local new_line="$n|$name|$url|$new_token|$model|$haiku|$sonnet|$small"
+
+  # 使用 sed 替换整行
+  # 使用 # 作为分隔符，避免与内容中的 / 冲突
+  # 匹配以空格开头 + 开头的引号 + 编号 + |
+  # macOS (BSD sed) 需要 -i '' 参数，GNU sed 不需要
+  if [[ "$(uname)" == "Darwin" ]]; then
+    sed -i '' "s#^[[:space:]]*\"$edit_num|.*#  \"$new_line\"#" "$script_path"
+  else
+    sed -i "s#^[[:space:]]*\"$edit_num|.*#  \"$new_line\"#" "$script_path"
+  fi
+
+  if [[ $? -eq 0 ]]; then
+    _gum_log info "✓ API Key 更新成功！需要重新加载脚本生效"
+    echo ""
+    echo "修改已写入: $script_path"
+    echo "下次运行脚本将使用新的 API Key"
+    echo ""
+  else
+    _gum_log error "修改失败，请手动编辑脚本文件"
+    echo ""
+  fi
 }
 
 # ── 显示帮助 (动态生成) ──
@@ -1127,6 +1272,7 @@ show_help() {
   echo ""
   echo "用法:"
   echo "  ~/cc.sh           # 交互式菜单"
+  echo "  ~/cc.sh e         # 编辑供应商 API Key"
   echo "  ~/cc.sh 0         # 速度测试所有供应商"
   for entry in "${PROVIDERS[@]}"; do
     _parse_provider "$entry"
@@ -1139,6 +1285,7 @@ show_help() {
   echo ""
   echo "示例:"
   echo "  ~/cc.sh 1 -m claude-sonnet-4-6   # 使用供应商 1，指定 sonnet 模型"
+  echo "  ~/cc.sh e                         # 交互式编辑 API Key"
   echo "  ~/cc.sh 6 -m qwen3.5-plus        # 使用供应商 6，指定通义千问模型"
   echo "  ~/cc.sh 5 -m gpt-5.4             # 使用供应商 5，指定 GPT-5.4 模型"
   echo ""
@@ -1194,7 +1341,7 @@ main() {
       show_status
       while true; do
         show_menu
-        read -p "请输入选项 (0-${PROVIDER_COUNT}/v/m/q/回车=当前): " choice
+        read -p "请输入选项 (0-${PROVIDER_COUNT}/v/m/q/↵): " choice
         case "$choice" in
           0)
             run_speed_test
@@ -1214,7 +1361,7 @@ main() {
             break
             ;;
           v|verify)
-            read -p "验证哪个供应商编号 (回车=全部): " vnum
+            read -p "验证哪个供应商编号 (↵=全部): " vnum
             if [[ -z "$vnum" ]]; then
               for entry in "${PROVIDERS[@]}"; do
                 _parse_provider "$entry"
@@ -1225,12 +1372,15 @@ main() {
             fi
             ;;
           m|models)
-            read -p "查询哪个供应商编号 (回车=全部): " mnum
+            read -p "查询哪个供应商编号 (↵=全部): " mnum
             run_list_models "$mnum"
+            ;;
+          e|edit|edit-key)
+            edit_provider_token
             ;;
           q|quit) echo "退出"; exit 0 ;;
           "")
-            # 直接回车：使用当前配置的供应商，沿用上次模型
+            # 直接↵：使用当前配置的供应商，沿用上次模型
             local current_url current_model
             read -r current_url current_model < <(_read_current_config)
             if [[ -n "$current_url" && "$current_url" != "ERROR" ]]; then
@@ -1279,6 +1429,9 @@ main() {
       ;;
     models|m)
       run_list_models "${2:-}"
+      ;;
+    edit|e|edit-key)
+      edit_provider_token
       ;;
     status|s)
       show_status

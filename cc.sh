@@ -1222,46 +1222,35 @@ edit_provider_token() {
     return 1
   fi
 
-  # 脚本路径
-  local script_path="${BASH_SOURCE[0]}"
-  if [[ ! -w "$script_path" ]]; then
-    _gum_log error "脚本文件 $script_path 不可写，请手动编辑修改"
+  # 配置文件路径
+  if [[ ! -w "$API_KEYS_CONF" ]]; then
+    _gum_log error "配置文件 $API_KEYS_CONF 不可写，请手动编辑修改"
     echo ""
     return 1
   fi
 
-  # 使用 sed 替换这一行
-  # 格式: "编号|名称|URL|Token|模型|..."
-  # 需要保留原有分隔符，只替换 Token 字段
-  local old_line="$target_entry"
-  # 移除开头的空格和引号
-  old_line=$(echo "$old_line" | sed 's/^[[:space:]]*"//; s/"$//')
-
   # 按 | 分割，替换第四段
   local n name url _ model haiku sonnet small
-  IFS='|' read -r n name url _ model haiku sonnet small <<< "$old_line"
+  IFS='|' read -r n name url _ model haiku sonnet small <<< "$target_entry"
 
   # 重新构建行
   local new_line="$n|$name|$url|$new_token|$model|$haiku|$sonnet|$small"
 
   # 使用 sed 替换整行
-  # 使用 # 作为分隔符，避免与内容中的 / 冲突
-  # 匹配以空格开头 + 开头的引号 + 编号 + |
-  # macOS (BSD sed) 需要 -i '' 参数，GNU sed 不需要
   if [[ "$(uname)" == "Darwin" ]]; then
-    sed -i '' "s#^[[:space:]]*\"$edit_num|.*#  \"$new_line\"#" "$script_path"
+    sed -i '' "s#^$edit_num|.*#$new_line#" "$API_KEYS_CONF"
   else
-    sed -i "s#^[[:space:]]*\"$edit_num|.*#  \"$new_line\"#" "$script_path"
+    sed -i "s#^$edit_num|.*#$new_line#" "$API_KEYS_CONF"
   fi
 
   if [[ $? -eq 0 ]]; then
     _gum_log info "✓ API Key 更新成功！需要重新加载脚本生效"
     echo ""
-    echo "修改已写入: $script_path"
+    echo "修改已写入: $API_KEYS_CONF"
     echo "下次运行脚本将使用新的 API Key"
     echo ""
   else
-    _gum_log error "修改失败，请手动编辑脚本文件"
+    _gum_log error "修改失败，请手动编辑配置文件"
     echo ""
   fi
 }

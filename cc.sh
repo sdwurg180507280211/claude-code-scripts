@@ -14,6 +14,15 @@ set -o pipefail
 # 安全设置：确保新建文件权限严格
 umask 0077
 
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+NC='\033[0m'
+
 # 依赖检查
 for cmd in python3 perl curl; do
   command -v "$cmd" &>/dev/null || {
@@ -21,6 +30,13 @@ for cmd in python3 perl curl; do
     exit 1
   }
 done
+
+# Python 版本检查 (需要 3.6+)
+if ! python3 -c "import sys; assert sys.version_info >= (3, 6)" 2>/dev/null; then
+  echo "错误: Python 版本过低，需要 3.6 或更高版本" >&2
+  echo "当前版本: $(python3 --version 2>&1 || echo "未知")" >&2
+  exit 1
+fi
 
 # 配置目录
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
@@ -38,15 +54,6 @@ _global_cleanup() {
 trap _global_cleanup EXIT INT TERM
 
 mkdir -p "$BACKUP_DIR"
-
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-DIM='\033[2m'
-NC='\033[0m'
 
 # ── 供应商数据 (唯一数据源) ──
 # 格式: 编号|名称|URL|Token|模型|haiku模型|sonnet模型|small_fast模型

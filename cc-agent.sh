@@ -18,10 +18,10 @@ set -o pipefail
 # 安全设置：确保新建文件权限严格
 umask 0077
 
-# 配置目录
-AGENTS_DIR="$HOME/.claude/agents"
-PID_DIR="$AGENTS_DIR/pids"
-LOG_DIR="$AGENTS_DIR/logs"
+# 设置脚本目录
+if [[ -z "${SCRIPT_DIR:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 # 颜色定义
 RED='\e[0;31m'
@@ -32,10 +32,17 @@ CYAN='\e[0;36m'
 DIM='\e[2m'
 NC='\e[0m'
 
-# 设置脚本目录
-if [[ -z "${SCRIPT_DIR:-}" ]]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Python 版本检查 (需要 3.6+)
+if ! python3 -c "import sys; assert sys.version_info >= (3, 6)" 2>/dev/null; then
+  echo -e "${RED}错误: Python 版本过低，需要 3.6 或更高版本${NC}" >&2
+  echo -e "${RED}当前版本: $(python3 --version 2>&1 || echo "未知")${NC}" >&2
+  exit 1
 fi
+
+# 配置目录
+AGENTS_DIR="$HOME/.claude/agents"
+PID_DIR="$AGENTS_DIR/pids"
+LOG_DIR="$AGENTS_DIR/logs"
 
 # 初始化目录
 init_dirs() {
@@ -44,14 +51,27 @@ init_dirs() {
     chmod 700 "$AGENTS_DIR" "$PID_DIR" "$LOG_DIR"
 }
 
-# 从 cc.sh 获取供应商信息
+# 从 api-keys.conf 获取供应商信息
 get_vendor_info() {
     local num="$1"
-    # 从 cc.sh 读取供应商数据
-    local cc_script="${SCRIPT_DIR}/cc.sh"
-    [[ ! -f "$cc_script" ]] && cc_script="$HOME/cc.sh"
-    [[ ! -f "$cc_script" ]] && cc_script="./cc.sh"
-    grep -E "^[[:space:]]*\"$num\|" "$cc_script" 2>/dev/null | head -1 || true
+    # 从 api-keys.conf 读取供应商数据
+    local api_keys_conf="${SCRIPT_DIR}/api-keys.conf"
+    [[ ! -f "$api_keys_conf" ]] && api_keys_conf="$HOME/api-keys.conf"
+    [[ ! -f "$api_keys_conf" ]] && api_keys_conf="./api-keys.conf"
+
+    if [[ ! -f "$api_keys_conf" ]]; then
+        return
+    fi
+
+    # 查找匹配的供应商行（格式：数字|名称|...）
+    while IFS= read -r line; do
+        # 跳过空行和注释
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" =~ ^"$num"\| ]]; then
+            echo "$line"
+            return
+        fi
+    done < "$api_keys_conf"
 }
 
 # 生成唯一的 Session ID
@@ -73,10 +93,20 @@ create_agent() {
         exit 1
     fi
 
-    # 安全验证：Agent 名称只能包含字母、数字、下划线、连字符
-    # 防止路径遍历攻击
-    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        echo -e "${RED}错误: Agent 名称只能包含字母、数字、下划线(_)和连字符(-)${NC}"
+    # 安全验证：禁止路径分隔符和父目录遍历
+    # 防止路径遍历攻击，但允许中文、空格等友好字符
+    if [[ "$name" == *"/"* || "$name" == *"\\"* || "$name" == *".."* ]]; then
+        echo -e "${RED}错误: Agent 名称不能包含路径分隔符 (/, \\) 或 '..'${NC}"
+        exit 1
+    fi
+    # 禁止以连字符开头（防止被误认为命令行参数）
+    if [[ "$name" =~ ^- ]]; then
+        echo -e "${RED}错误: Agent 名称不能以连字符 (-) 开头${NC}"
+        exit 1
+    fi
+    # 禁止空字符串或仅含空白
+    if [[ -z "${name// /}" ]]; then
+        echo -e "${RED}错误: Agent 名称不能为空或仅含空格${NC}"
         exit 1
     fi
 
@@ -96,13 +126,9 @@ create_agent() {
     fi
 
     # 解析供应商数据
-    # 格式: "编号|名称|URL|Token|模型|..."
+    # 格式: 编号|名称|URL|Token|模型|...
     local v_num v_name v_url v_token v_model
-    v_num=$(echo "$vendor_line" | grep -oE '[0-9]+' | head -1 || true)
-    v_name=$(echo "$vendor_line" | cut -d'|' -f2 | tr -d '"')
-    v_url=$(echo "$vendor_line" | cut -d'|' -f3 | tr -d '"')
-    v_token=$(echo "$vendor_line" | cut -d'|' -f4 | tr -d '"')
-    v_model=$(echo "$vendor_line" | cut -d'|' -f5 | tr -d '"')
+    IFS='|' read -r v_num v_name v_url v_token v_model _ <<< "$vendor_line"
 
     # 使用自定义模型或默认模型
     local final_model="${custom_model:-$v_model}"

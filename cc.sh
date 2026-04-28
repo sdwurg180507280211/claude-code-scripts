@@ -1000,6 +1000,8 @@ ask_for_model() {
       actual_default="qwen3.5-plus"
   elif [[ "$provider_name" == *"火山方舟"* ]]; then
       actual_default="ark-code-latest"
+  elif [[ "$provider_name" == *"DeepSeek"* ]]; then
+      actual_default="deepseek-v4-pro"
   fi
 
   printf "  请选择模型 %b[默认：%s]%b:\n" "$DIM" "$actual_default" "$NC"
@@ -1010,6 +1012,34 @@ ask_for_model() {
       CUSTOM_MODEL="kimi-k2.5"
       printf "使用模型：%bkimi-k2.5%b (Kimi 只支持此模型)\n" "$GREEN" "$NC"
       echo ""
+  # DeepSeek 供应商 - 显示专属模型列表
+  elif [[ "$provider_name" == *"DeepSeek"* ]]; then
+      printf "    %b1) deepseek-v4-pro    (专业版) ● 当前%b\n" "$RED" "$NC"
+      echo "    2) deepseek-v4-flash  (快速版)"
+      echo "    3) 手动输入模型名称"
+      echo "    b) 返回主菜单"
+      echo ""
+      read -p "  输入选项 (1-3/b/↵): " model_choice
+
+      case "$model_choice" in
+        1) CUSTOM_MODEL="deepseek-v4-pro" ;;
+        2) CUSTOM_MODEL="deepseek-v4-flash" ;;
+        3)
+          read -p "请输入模型名称： " CUSTOM_MODEL
+          ;;
+        b|B)
+          printf "%b已取消%b\n" "$YELLOW" "$NC"
+          echo ""
+          return 1
+          ;;
+        "")
+          CUSTOM_MODEL=""
+          ;;
+        *)
+          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
+          CUSTOM_MODEL=""
+          ;;
+      esac
   # 火山方舟供应商 - 显示专属模型列表
   elif [[ "$provider_name" == *"火山方舟"* ]]; then
       printf "    %b1) ark-code-latest        (最新代码专用) ● 当前%b\n" "$RED" "$NC"

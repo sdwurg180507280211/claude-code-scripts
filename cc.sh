@@ -4,7 +4,6 @@
 # 用法：~/cc.sh [选项]
 #   无参数：交互式选择
 #   1-N: 直接选择对应供应商
-#   0/test: 速度测试
 #   status: 查看当前配置
 #   -m <model>: 指定模型（不指定则使用供应商默认模型）
 
@@ -24,7 +23,7 @@ DIM='\033[2m'
 NC='\033[0m'
 
 # 依赖检查
-for cmd in python3 perl curl; do
+for cmd in python3; do
   command -v "$cmd" &>/dev/null || {
     echo "错误: 需要安装 $cmd" >&2
     exit 1
@@ -76,7 +75,6 @@ else
 fi
 
 PROVIDER_COUNT=${#PROVIDERS[@]}
-TEST_TIMEOUT=8
 CUSTOM_MODEL=""
 
 # ── 从数组解析供应商字段 ──
@@ -86,28 +84,6 @@ _parse_provider() {
   P_HAIKU="${P_HAIKU:-$P_MODEL}"
   P_SONNET="${P_SONNET:-$P_MODEL}"
   P_SMALL="${P_SMALL:-$P_MODEL}"
-}
-
-# ── 构建认证 header 参数 ──
-_build_auth_args() {
-  local token="$1"
-  auth_header_args=()
-  if [[ "$token" == aicoding-* ]]; then
-    auth_header_args=(-H "Authorization: ${token}")
-  else
-    auth_header_args=(-H "x-api-key: ${token}" -H "Authorization: Bearer ${token}")
-  fi
-}
-
-# ── 构建 API URL ──
-_build_api_url() {
-  local base_url="$1"
-  local endpoint="$2"
-  if [[ "$base_url" == */v1 ]]; then
-    echo "${base_url}/${endpoint}"
-  else
-    echo "${base_url}/v1/${endpoint}"
-  fi
 }
 
 # ── 读取当前配置 ──
@@ -210,561 +186,6 @@ settings = {
 json.dump(settings, sys.stdout, ensure_ascii=False, indent=2)
 sys.stdout.write("\n")
 '
-}
-
-# ── 速度测试 ──
-_get_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000'; }
-
-# 计算字符串显示宽度（中文=2，英文=1）
-_display_width() {
-  echo "$1" | perl -C -ne 'use utf8; my $w=0; for(split//){$w+=/\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}/||/[\x{3000}-\x{303F}\x{FF00}-\x{FFEF}]/||/[\x{2E80}-\x{9FFF}]/||/[\x{AC00}-\x{D7AF}]/?2:1} print $w'
-}
-
-# 右侧填充空格到指定显示宽度
-_pad_right() {
-  local str="$1" target_width="$2"
-  local current_width=$(_display_width "$str")
-  local padding=$((target_width - current_width))
-  if [[ $padding -gt 0 ]]; then
-    printf "%s%*s" "$str" "$padding" ""
-  else
-    printf "%s" "$str"
-  fi
-}
-
-# 格式化单行结果并输出 (支持 TTFT + 总耗时)
-_print_result_line() {
-  local line="$1"
-  IFS='|' read -r num name http_code ttft total ret_model tokens reply <<< "$line"
-  local ttft_fmt total_fmt
-  if (( ttft > 1000 )); then
-    ttft_fmt=$(perl -e "printf '%.1fs', $ttft/1000")
-  else
-    ttft_fmt="${ttft}ms"
-  fi
-  if (( total > 1000 )); then
-    total_fmt=$(perl -e "printf '%.1fs', $total/1000")
-  else
-    total_fmt="${total}ms"
-  fi
-
-  # 截断过长的错误信息
-  if [[ ${#reply} -gt 50 ]]; then
-    reply="${reply:0:47}..."
-  fi
-
-  # 使用显示宽度对齐
-  local num_col=$(_pad_right "${num})" 5)
-  local name_col=$(_pad_right "$name" 38)
-
-  # 状态列固定宽度
-  local status_display
-  if [[ "$http_code" == "200" ]]; then
-    status_display="200"
-  elif [[ "$http_code" == "FAIL" ]]; then
-    status_display="失败"
-  else
-    status_display="$http_code"
-  fi
-  local http_col=$(_pad_right "$status_display" 10)
-
-  printf -v ttft_col "%9s" "$ttft_fmt"
-  printf -v total_col "%9s" "$total_fmt"
-  local model_col=$(_pad_right "${ret_model:--}" 28)
-  local token_col=$(_pad_right "${tokens:--}" 12)
-
-  if [[ "$http_code" == "200" ]]; then
-    printf "%b%s%b%s%b%s%b%s %s %s%s%s\n" \
-      "$GREEN" "$num_col" "$NC" "$name_col" "$GREEN" "$http_col" "$NC" "$ttft_col" "$total_col" "$model_col" "$token_col" "$reply"
-  else
-    printf "%b%s%b%s%b%s%b%s %s %s%s%b%s%b\n" \
-      "$RED" "$num_col" "$NC" "$name_col" "$RED" "$http_col" "$NC" "$ttft_col" "$total_col" "$model_col" "$token_col" "$RED" "$reply" "$NC"
-  fi
-}
-
-# 解析 SSE stream 响应，提取 TTFT、模型、tokens、回复
-# 通过 pipe 实时读取 curl SSE 输出，准确测量 TTFT
-# 输出: OK|ttft_ms|model|tok_in|tok_out|reply  或  ERR|msg
-_parse_stream_response() {
-  python3 -c "
-import sys, json, time
-
-start_ms = int(sys.argv[1])
-ttft = -1
-model = '?'
-tok_in = '?'
-tok_out = '?'
-texts = []
-error_msg = ''
-got_sse = False
-
-def now_ms():
-    return int(time.time() * 1000)
-
-for raw_line in sys.stdin:
-    line = raw_line.strip()
-    if not line:
-        continue
-    # 非 SSE 响应容错 (纯文本/HTML/JSON 错误)
-    if not got_sse:
-        if line.startswith('{'):
-            try:
-                d = json.loads(line)
-                e = d.get('error', {})
-                msg = e.get('message', str(e)) if isinstance(e, dict) else str(e)
-                print(f'ERR|{msg[:120]}')
-            except:
-                print(f'ERR|{line[:120]}')
-            sys.exit(0)
-        elif not line.startswith('data:') and not line.startswith('event:'):
-            # 纯文本错误
-            print(f'ERR|{line[:120]}')
-            sys.exit(0)
-
-    if not line.startswith('data:'):
-        if line.startswith('event:'):
-            got_sse = True
-        continue
-
-    got_sse = True
-    data = line[5:].strip()
-    if data == '[DONE]':
-        break
-    try:
-        d = json.loads(data)
-    except:
-        continue
-    etype = d.get('type', '')
-    if etype == 'error':
-        e = d.get('error', {})
-        error_msg = e.get('message', str(e)) if isinstance(e, dict) else str(e)
-        break
-    if etype == 'message_start':
-        msg = d.get('message', {})
-        model = msg.get('model', '?')
-        usage = msg.get('usage', {})
-        tok_in = usage.get('input_tokens', '?')
-        # TTFT = 收到 message_start 的时间
-        if ttft < 0:
-            ttft = now_ms() - start_ms
-    elif etype == 'content_block_delta':
-        delta = d.get('delta', {})
-        delta_type = delta.get('type', '')
-        if delta_type == 'text_delta':
-            texts.append(delta.get('text', ''))
-        # thinking_delta 不纳入 texts
-    elif etype == 'message_delta':
-        usage = d.get('usage', {})
-        tok_out = usage.get('output_tokens', tok_out)
-
-if error_msg:
-    print(f'ERR|{error_msg[:120]}')
-elif texts or model != '?':
-    reply = ''.join(texts).strip()[:80] if texts else '(thinking only)'
-    if ttft < 0:
-        ttft = 0
-    print(f'OK|{ttft}|{model}|{tok_in}|{tok_out}|{reply}')
-else:
-    print(f'ERR|no content received')
-" "$1" 2>/dev/null
-}
-
-# 测试单个供应商一次 (stream 模式，pipe 实时测 TTFT)
-# 输出: OK|ttft|total|model|tok_in/tok_out|reply  或  FAIL|total|errmsg
-_test_one_round() {
-  local entry="$1"
-  _parse_provider "$entry"
-  local test_url
-  test_url=$(_build_api_url "$P_URL" "messages")
-
-  local -a auth_header_args
-  _build_auth_args "$P_TOKEN"
-
-  local start=$(_get_ms)
-  local tmp_out=$(mktemp)
-  TEMP_FILES+=("$tmp_out")
-
-  # 用 pipe 方式让 python 实时读取 SSE 流，准确测量 TTFT
-  curl -sS -N --max-time "$TEST_TIMEOUT" \
-    -X POST "$test_url" \
-    -H "Content-Type: application/json" \
-    -H "anthropic-version: 2023-06-01" \
-    "${auth_header_args[@]}" \
-    -d "{\"model\":\"${P_MODEL}\",\"max_tokens\":30,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Say ok\"}]}" 2>/dev/null \
-  | _parse_stream_response "$start" > "$tmp_out" 2>/dev/null
-  local total=$(( $(_get_ms) - start ))
-
-  local parsed
-  parsed=$(cat "$tmp_out" 2>/dev/null || echo "")
-
-  # curl 超时或连接失败且无输出
-  if [[ -z "$parsed" ]]; then
-    echo "FAIL|${total}|连接超时 (${TEST_TIMEOUT}s)"
-    return
-  fi
-
-  local tag=$(echo "$parsed" | cut -d'|' -f1)
-
-  if [[ "$tag" == "OK" ]]; then
-    local ttft=$(echo "$parsed" | cut -d'|' -f2)
-    local ret_model=$(echo "$parsed" | cut -d'|' -f3)
-    local tok_in=$(echo "$parsed" | cut -d'|' -f4)
-    local tok_out=$(echo "$parsed" | cut -d'|' -f5)
-    local reply=$(echo "$parsed" | cut -d'|' -f6-)
-    echo "OK|${ttft}|${total}|${ret_model}|${tok_in}/${tok_out}|${reply}"
-  else
-    local errmsg=$(echo "$parsed" | cut -d'|' -f2-)
-    echo "FAIL|${total}|${errmsg}"
-  fi
-}
-
-# 测试单个供应商 (2 轮取较快值) 并实时输出
-_test_one_live() {
-  local entry="$1" result_file="$2"
-  _parse_provider "$entry"
-
-  local best_ttft=999999 best_total=999999 best_line="" status_tag="FAIL"
-  local round=1 rounds=2
-
-  while (( round <= rounds )); do
-    local result
-    result=$(_test_one_round "$entry")
-    local tag=$(echo "$result" | cut -d'|' -f1)
-
-    if [[ "$tag" == "OK" ]]; then
-      local ttft=$(echo "$result" | cut -d'|' -f2)
-      local total=$(echo "$result" | cut -d'|' -f3)
-      local ret_model=$(echo "$result" | cut -d'|' -f4)
-      local tokens=$(echo "$result" | cut -d'|' -f5)
-      local reply=$(echo "$result" | cut -d'|' -f6-)
-
-      if (( ttft < best_ttft )); then
-        best_ttft=$ttft
-        best_total=$total
-        best_line="${P_NUM}|${P_NAME}|200|${best_ttft}|${best_total}|${ret_model}|${tokens}|${reply}"
-        status_tag="OK"
-      fi
-    else
-      local total=$(echo "$result" | cut -d'|' -f2)
-      local errmsg=$(echo "$result" | cut -d'|' -f3-)
-      # 首轮失败则跳过第二轮
-      if [[ -z "$best_line" ]]; then
-        best_line="${P_NUM}|${P_NAME}|FAIL|${total}|${total}|||${errmsg}"
-      fi
-      break
-    fi
-    (( round++ ))
-  done
-
-  _print_result_line "$best_line"
-  echo "$status_tag" >> "$result_file"
-}
-
-# ── 功能验证（模拟 Claude Code 真实请求）──
-VERIFY_TIMEOUT=30
-
-_read_verify_lines() {
-  parsed_lines=()
-  local line
-  while IFS= read -r line; do
-    parsed_lines+=("$line")
-  done
-}
-
-_verify_response() {
-  python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    model = d.get('model', '?')
-    content = d.get('content', [])
-    has_tool_use = any(c.get('type') == 'tool_use' for c in content)
-    has_text = any(c.get('type') == 'text' for c in content)
-    texts = [c.get('text','') for c in content if c.get('type') == 'text']
-    reply = ' '.join(texts).strip()[:100].replace('\n', ' ')
-    if 'error' in d:
-        e = d['error']
-        msg = e.get('message', str(e)) if isinstance(e, dict) else str(e)
-        print('ERR')
-        print(msg[:120])
-    elif has_tool_use:
-        tool = next(c for c in content if c.get('type') == 'tool_use')
-        print('TOOL')
-        print(model)
-        print(tool.get('name','?'))
-        print(json.dumps(tool.get('input',{}))[:60])
-    elif has_text:
-        print('TEXT')
-        print(model)
-        print(reply)
-    else:
-        print('ERR')
-        print('unexpected response: ' + json.dumps(d)[:120])
-except Exception as ex:
-    print('ERR')
-    print(str(ex)[:120])
-" 2>/dev/null
-}
-
-# ── 模型列表查询 ──
-_parse_models_response() {
-  python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    if 'error' in d:
-        e = d['error']
-        msg = e.get('message', str(e)) if isinstance(e, dict) else str(e)
-        print('ERR|' + msg[:200])
-    elif 'data' in d:
-        models = [m.get('id', '?') for m in d['data']]
-        models.sort()
-        print('OK|' + '|'.join(models))
-    elif isinstance(d, list):
-        models = [m.get('id', '?') if isinstance(m, dict) else str(m) for m in d]
-        models.sort()
-        print('OK|' + '|'.join(models))
-    else:
-        print('ERR|unexpected: ' + json.dumps(d)[:200])
-except Exception as ex:
-    raw = sys.stdin.read().strip()
-    print('ERR|' + (raw[:200] if raw else str(ex)[:200]))
-" 2>/dev/null
-}
-
-list_models_provider() {
-  local num="$1"
-  local entry
-  entry=$(_find_provider "$num") || {
-    _gum_log error "无效的供应商编号 $num"
-    return 1
-  }
-  _parse_provider "$entry"
-
-  local models_url
-  models_url=$(_build_api_url "$P_URL" "models")
-
-  local -a auth_header_args
-  _build_auth_args "$P_TOKEN"
-
-  printf "\n  %b[%s]%b %s\n" "$CYAN" "$P_NUM" "$NC" "$P_NAME"
-  printf "  端点: %s\n" "$models_url"
-
-  local start=$(_get_ms)
-  local raw=$(curl -s -w "\n%{http_code}" --max-time "$VERIFY_TIMEOUT" \
-    -X GET "$models_url" \
-    -H "Content-Type: application/json" \
-    -H "anthropic-version: 2023-06-01" \
-    "${auth_header_args[@]}" 2>&1)
-  local duration=$(( $(_get_ms) - start ))
-  local http_code=$(echo "$raw" | tail -1)
-  local body=$(echo "$raw" | sed '$d')
-
-  if [[ -z "$http_code" || "$http_code" == "000" ]]; then
-    printf "  %b✗ 连接超时%b (${VERIFY_TIMEOUT}s)\n\n" "$RED" "$NC"
-    return
-  fi
-
-  local parsed=$(echo "$body" | _parse_models_response)
-  local tag=$(echo "$parsed" | cut -d'|' -f1)
-
-  if [[ "$tag" == "OK" ]]; then
-    local model_list=$(echo "$parsed" | cut -d'|' -f2-)
-    local count=$(echo "$model_list" | tr '|' '\n' | wc -l | tr -d ' ')
-    printf "  %b✓ HTTP %s%b (%.1fs, 共 %s 个模型)\n" "$GREEN" "$http_code" "$NC" \
-      "$(perl -e "printf '%.1f',$duration/1000")" "$count"
-
-    # 按类别分组显示
-    local claude_models="" gpt_models="" other_models=""
-    while IFS='|' read -d'|' -r m || [[ -n "$m" ]]; do
-      [[ -z "$m" ]] && continue
-      if [[ "$m" == claude-* ]]; then
-        claude_models+="    $m\n"
-      elif [[ "$m" == gpt-* || "$m" == o1-* || "$m" == o3-* || "$m" == o4-* ]]; then
-        gpt_models+="    $m\n"
-      else
-        other_models+="    $m\n"
-      fi
-    done <<< "${model_list}|"
-
-    if [[ -n "$claude_models" ]]; then
-      printf "  %bClaude 系列:%b\n" "$BLUE" "$NC"
-      printf "%b" "$claude_models"
-    fi
-    if [[ -n "$gpt_models" ]]; then
-      printf "  %bGPT/OpenAI 系列:%b\n" "$BLUE" "$NC"
-      printf "%b" "$gpt_models"
-    fi
-    if [[ -n "$other_models" ]]; then
-      printf "  %b其他模型:%b\n" "$BLUE" "$NC"
-      printf "%b" "$other_models"
-    fi
-  else
-    local errmsg=$(echo "$parsed" | cut -d'|' -f2-)
-    printf "  %b✗ HTTP %s%b (%.1fs) %s\n" "$RED" "$http_code" "$NC" \
-      "$(perl -e "printf '%.1f',$duration/1000")" "$errmsg"
-  fi
-  printf "\n"
-}
-
-run_list_models() {
-  printf "\n"
-  _gum_header "📋 供应商可用模型列表查询"
-  printf "\n"
-
-  local target="${1:-}"
-  if [[ -n "$target" ]]; then
-    list_models_provider "$target"
-  else
-    for entry in "${PROVIDERS[@]}"; do
-      _parse_provider "$entry"
-      list_models_provider "$P_NUM"
-    done
-  fi
-}
-
-verify_provider() {
-  local num="$1"
-  local entry
-  entry=$(_find_provider "$num") || {
-    _gum_log error "无效的供应商编号 $num"
-    return 1
-  }
-  _parse_provider "$entry"
-
-  local test_url
-  test_url=$(_build_api_url "$P_URL" "messages")
-
-  # 根据 token 格式选择 auth headers
-  local -a auth_header_args
-  _build_auth_args "$P_TOKEN"
-
-  printf "\n"
-  _gum_header "🔍 功能验证：${P_NAME}"
-  printf "\n  模型: %b%s%b\n  端点: %s\n\n" "$GREEN" "$P_MODEL" "$NC" "$test_url"
-
-  # 测试1：基础响应（较长输出）
-  printf "  %b[1/3]%b 基础响应测试 (max_tokens=300)... " "$YELLOW" "$NC"
-  local start=$(_get_ms)
-  local raw=$(curl -s -w "\n%{http_code}" --max-time "$VERIFY_TIMEOUT" \
-    -X POST "$test_url" \
-    -H "Content-Type: application/json" \
-    -H "anthropic-version: 2023-06-01" \
-    "${auth_header_args[@]}" \
-    -d "{\"model\":\"${P_MODEL}\",\"max_tokens\":300,\"stream\":false,\"system\":\"You are a coding assistant.\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a bubble sort in Python, just the code.\"}]}" 2>&1)
-  local duration=$(( $(_get_ms) - start ))
-  local http_code=$(echo "$raw" | tail -1)
-  local body=$(echo "$raw" | sed '$d')
-  local -a parsed_lines
-  local tag
-  _read_verify_lines < <(echo "$body" | _verify_response)
-  tag="${parsed_lines[0]}"
-  if [[ "$tag" == "TEXT" ]]; then
-    local ret_model="${parsed_lines[1]}"
-    local reply="${parsed_lines[2]}"
-    printf "%b✓ OK%b (%.1fs, 模型:%s)\n    回复: %s\n" "$GREEN" "$NC" "$(perl -e "printf '%.1f',$duration/1000")" "$ret_model" "$reply"
-  else
-    local errmsg="${parsed_lines[1]}"
-    printf "%b✗ FAIL%b (%.1fs) %s\n" "$RED" "$NC" "$(perl -e "printf '%.1f',$duration/1000")" "$errmsg"
-  fi
-
-  # 测试2：工具调用
-  printf "  %b[2/3]%b 工具调用测试 (tool_use)... " "$YELLOW" "$NC"
-  local tool_payload='{
-    "model":"'"${P_MODEL}"'",
-    "max_tokens":200,
-    "tools":[{
-      "name":"read_file",
-      "description":"Read a file from disk",
-      "input_schema":{
-        "type":"object",
-        "properties":{"path":{"type":"string","description":"file path"}},
-        "required":["path"]
-      }
-    }],
-    "messages":[{"role":"user","content":"Please read the file /etc/hosts"}]
-  }'
-  start=$(_get_ms)
-  raw=$(curl -s -w "\n%{http_code}" --max-time "$VERIFY_TIMEOUT" \
-    -X POST "$test_url" \
-    -H "Content-Type: application/json" \
-    -H "anthropic-version: 2023-06-01" \
-    "${auth_header_args[@]}" \
-    -d "$tool_payload" 2>&1)
-  duration=$(( $(_get_ms) - start ))
-  http_code=$(echo "$raw" | tail -1)
-  body=$(echo "$raw" | sed '$d')
-  _read_verify_lines < <(echo "$body" | _verify_response)
-  tag="${parsed_lines[0]}"
-  if [[ "$tag" == "TOOL" ]]; then
-    local tool_name="${parsed_lines[2]}"
-    local tool_input="${parsed_lines[3]}"
-    printf "%b✓ OK%b (%.1fs, 工具:%s, 参数:%s)\n" "$GREEN" "$NC" "$(perl -e "printf '%.1f',$duration/1000")" "$tool_name" "$tool_input"
-  elif [[ "$tag" == "TEXT" ]]; then
-    printf "%b△ 降级%b (%.1fs) 返回文本而非工具调用，可能不支持 tool_use\n" "$YELLOW" "$NC" "$(perl -e "printf '%.1f',$duration/1000")"
-  else
-    local errmsg="${parsed_lines[1]}"
-    printf "%b✗ FAIL%b (%.1fs) %s\n" "$RED" "$NC" "$(perl -e "printf '%.1f',$duration/1000")" "$errmsg"
-  fi
-
-  # 测试3：模型名一致性
-  printf "  %b[3/3]%b 模型名一致性检查... " "$YELLOW" "$NC"
-  raw=$(curl -s -w "\n%{http_code}" --max-time "$VERIFY_TIMEOUT" \
-    -X POST "$test_url" \
-    -H "Content-Type: application/json" \
-    -H "anthropic-version: 2023-06-01" \
-    "${auth_header_args[@]}" \
-    -d "{\"model\":\"${P_MODEL}\",\"max_tokens\":10,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" 2>&1)
-  http_code=$(echo "$raw" | tail -1)
-  body=$(echo "$raw" | sed '$d')
-  _read_verify_lines < <(echo "$body" | _verify_response)
-  tag="${parsed_lines[0]}"
-  if [[ "$tag" == "TEXT" || "$tag" == "TOOL" ]]; then
-    local ret_model="${parsed_lines[1]}"
-    if [[ "$ret_model" == "$P_MODEL"* ]]; then
-      printf "%b✓ 一致%b (请求:%s 返回:%s)\n" "$GREEN" "$NC" "$P_MODEL" "$ret_model"
-    else
-      printf "%b△ 不一致%b (请求:%s 但返回:%s)\n" "$YELLOW" "$NC" "$P_MODEL" "$ret_model"
-    fi
-  else
-    local errmsg="${parsed_lines[1]:-未知错误}"
-    printf "%b✗ FAIL%b %s\n" "$RED" "$NC" "$errmsg"
-  fi
-
-  printf "\n"
-}
-
-run_speed_test() {
-  local work_dir=$(mktemp -d)
-  local result_file="${work_dir}/results"
-  touch "$result_file"
-  trap 'rm -rf "$work_dir"' RETURN
-
-  printf "\n"
-  _gum_header "⚡ 供应商速度测试"
-  printf "\n  测试模式：Stream | 策略：2 轮取优 | 超时：${TEST_TIMEOUT}s\n\n"
-
-  local num_col=$(_pad_right "#" 5)
-  local name_col=$(_pad_right "供应商" 38)
-  local http_col=$(_pad_right "状态" 10)
-  printf -v ttft_col "%9s" "TTFT"
-  printf -v total_col "%9s" "总耗时"
-  local model_col=$(_pad_right "返回模型" 28)
-  local token_col=$(_pad_right "Tokens" 12)
-
-  printf "%b%s%s%s%s %s %s%s回复/错误%b\n" "$CYAN" "$num_col" "$name_col" "$http_col" "$ttft_col" "$total_col" "$model_col" "$token_col" "$NC"
-  printf "%b%s%b\n" "$DIM" "$(printf '─%.0s' {1..140})" "$NC"
-
-  for entry in "${PROVIDERS[@]}"; do
-    _test_one_live "$entry" "$result_file"
-  done
-
-  local pass=$(grep -c "^OK$" "$result_file" 2>/dev/null || echo 0)
-  local fail=$(grep -c "^FAIL$" "$result_file" 2>/dev/null || echo 0)
-
-  printf "%b%s%b\n" "$DIM" "$(printf '─%.0s' {1..140})" "$NC"
-  printf "  %b✅ 可用: %d%b    %b❌ 不可用: %d%b    共 %d 个供应商\n\n" \
-    "$GREEN" "$pass" "$NC" "$RED" "$fail" "$NC" "$((pass + fail))"
 }
 
 # ── 显示当前配置 ──
@@ -918,7 +339,7 @@ show_menu() {
 
   _gum_header "🔧 Claude Code 供应商切换工具"
   echo ""
-  printf "  %b说明:%b 输入编号切换供应商，0 测速，v 验证，m 模型列表，q 退出\n" "$DIM" "$NC"
+  printf "  %b说明:%b 输入编号切换供应商，e 编辑 API Key，q 退出\n" "$DIM" "$NC"
   echo ""
 
   # 分类显示供应商
@@ -933,9 +354,8 @@ show_menu() {
   echo ""
   printf "  %b【功能选项】%b\n" "$CYAN" "$NC"
   echo ""
-  printf "    %b0%b) ⚡ 速度测试          %bv%b) 🔍 功能验证\n" "$YELLOW" "$NC" "$YELLOW" "$NC"
-  printf "    %bm%b) 📋 模型列表          %be%b) ✏️ 编辑 API Key\n" "$YELLOW" "$NC" "$YELLOW" "$NC"
-  printf "    %bq%b) 退出                %b[↵]%b 使用当前配置重启\n" "$RED" "$NC" "$DIM" "$NC"
+  printf "    %be%b) ✏️ 编辑 API Key        %bq%b) 退出\n" "$YELLOW" "$NC" "$RED" "$NC"
+  printf "    %b[↵]%b 使用当前配置重启\n" "$DIM" "$NC"
   echo ""
 }
 
@@ -1219,13 +639,10 @@ show_help() {
   echo "用法:"
   echo "  ~/cc.sh           # 交互式菜单"
   echo "  ~/cc.sh e         # 编辑供应商 API Key"
-  echo "  ~/cc.sh 0         # 速度测试所有供应商"
   for entry in "${PROVIDERS[@]}"; do
     _parse_provider "$entry"
     printf "  ~/cc.sh %-10s # 切换到 %s\n" "$P_NUM" "$P_NAME"
   done
-  echo "  ~/cc.sh models    # 查询所有供应商可用模型"
-  echo "  ~/cc.sh models 1  # 查询指定供应商可用模型"
   echo "  ~/cc.sh status    # 查看当前配置"
   echo "  ~/cc.sh -m <model>   # 指定模型 (不指定则使用供应商默认模型)"
   echo ""
@@ -1270,11 +687,8 @@ main() {
       show_status
       while true; do
         show_menu
-        read -r -p "请输入选项 (0-${PROVIDER_COUNT}/v/m/q/↵): " choice
+        read -r -p "请输入选项 (1-${PROVIDER_COUNT}/e/q/↵): " choice
         case "$choice" in
-          0)
-            run_speed_test
-            ;;
           [1-9]|[1-9][0-9])
             if [[ -z "$CUSTOM_MODEL" && -t 0 ]]; then
               entry=$(_find_provider "$choice") || {
@@ -1286,21 +700,6 @@ main() {
             fi
             switch_provider "$choice"
             break
-            ;;
-          v|verify)
-            read -r -p "验证哪个供应商编号 (↵=全部): " vnum
-            if [[ -z "$vnum" ]]; then
-              for entry in "${PROVIDERS[@]}"; do
-                _parse_provider "$entry"
-                verify_provider "$P_NUM"
-              done
-            else
-              verify_provider "$vnum"
-            fi
-            ;;
-          m|models)
-            read -r -p "查询哪个供应商编号 (↵=全部): " mnum
-            run_list_models "$mnum"
             ;;
           e|edit|edit-key)
             edit_provider_token
@@ -1336,25 +735,8 @@ main() {
         esac
       done
       ;;
-    0|test)
-      run_speed_test
-      ;;
     [1-9]|1[0-9]|[2-9][0-9])
       switch_provider "$1"
-      ;;
-    verify|v)
-      if [[ -z "${2:-}" ]]; then
-        # 无参数：对所有供应商依次验证
-        for entry in "${PROVIDERS[@]}"; do
-          _parse_provider "$entry"
-          verify_provider "$P_NUM"
-        done
-      else
-        verify_provider "$2"
-      fi
-      ;;
-    models|m)
-      run_list_models "${2:-}"
       ;;
     edit|e|edit-key)
       edit_provider_token

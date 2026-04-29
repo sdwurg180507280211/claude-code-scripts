@@ -933,8 +933,8 @@ show_menu() {
   printf "%b【分类选择】%b\n" "$CYAN" "$NC"
   echo ""
 
-  # ── Claude 中转
-  printf "  %b▸ Claude 中转%b (共用 token)\n" "$BLUE" "$NC"
+  # ── FoxCode 中转 (newcli 系列)
+  printf "  %b▸ FoxCode 中转%b (newcli, 共用 token)\n" "$BLUE" "$NC"
   for entry in "${PROVIDERS[@]:0:4}"; do
     _parse_provider "$entry"
     if [[ "$current_url" == "$P_URL" ]]; then
@@ -945,9 +945,9 @@ show_menu() {
   done
   echo ""
 
-  # ── GPT 模型
-  printf "  %b▸ GPT 模型%b (独立供应商)\n" "$BLUE" "$NC"
-  for entry in "${PROVIDERS[@]:4:2}"; do
+  # ── 国内模型
+  printf "  %b▸ 国内模型%b (Kimi / Qwen / 火山 / DeepSeek)\n" "$BLUE" "$NC"
+  for entry in "${PROVIDERS[@]:4:4}"; do
     _parse_provider "$entry"
     if [[ "$current_url" == "$P_URL" ]]; then
       printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
@@ -957,9 +957,9 @@ show_menu() {
   done
   echo ""
 
-  # ── 其他模型
-  printf "  %b▸ 其他模型%b (Kimi / Qwen / 火山)\n" "$BLUE" "$NC"
-  for entry in "${PROVIDERS[@]:6}"; do
+  # ── 其它供应商
+  printf "  %b▸ 其它供应商%b\n" "$BLUE" "$NC"
+  for entry in "${PROVIDERS[@]:8:2}"; do
     _parse_provider "$entry"
     if [[ "$current_url" == "$P_URL" ]]; then
       printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
@@ -992,7 +992,11 @@ ask_for_model() {
 
   # 根据供应商类型设置默认模型
   local actual_default="$DEFAULT_MODEL"
-  if [[ "$provider_name" == newcli/* ]]; then
+  if [[ "$provider_name" == newcli/codex* ]]; then
+      actual_default="gpt-5.5"
+  elif [[ "$provider_name" == newcli/aws* ]]; then
+      actual_default="claude-sonnet-4-5"
+  elif [[ "$provider_name" == newcli/* ]]; then
       actual_default="claude-opus-4-6"
   elif [[ "$provider_name" == *"PuCode"* || "$provider_name" == *"LinkAPI"* ]]; then
       actual_default="gpt-5.4"
@@ -1082,11 +1086,79 @@ ask_for_model() {
           CUSTOM_MODEL=""
           ;;
       esac
-  # Claude 中转 (newcli 系列) - 只显示 Claude 模型
+  # Codex 渠道 (newcli/codex) - GPT 模型
+  elif [[ "$provider_name" == newcli/codex* ]]; then
+      printf "    %b1) gpt-5.5             (最强) ● 当前%b\n" "$RED" "$NC"
+      echo "    2) gpt-5.4              (均衡)"
+      echo "    3) gpt-5.3-codex        (代码专用)"
+      echo "    4) gpt-5.2              (快速)"
+      echo "    5) 手动输入模型名称"
+      echo "    b) 返回主菜单"
+      echo ""
+      read -p "  输入选项 (1-5/b/↵): " model_choice
+
+      case "$model_choice" in
+        1) CUSTOM_MODEL="gpt-5.5" ;;
+        2) CUSTOM_MODEL="gpt-5.4" ;;
+        3) CUSTOM_MODEL="gpt-5.3-codex" ;;
+        4) CUSTOM_MODEL="gpt-5.2" ;;
+        5)
+          read -p "请输入模型名称： " CUSTOM_MODEL
+          ;;
+        b|B)
+          printf "%b已取消%b\n" "$YELLOW" "$NC"
+          echo ""
+          return 1
+          ;;
+        "")
+          CUSTOM_MODEL=""
+          ;;
+        *)
+          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
+          CUSTOM_MODEL=""
+          ;;
+      esac
+  # AWS 特价 (newcli/aws) - AWS 专属 Claude 模型
+  elif [[ "$provider_name" == newcli/aws* ]]; then
+      printf "    %b1) claude-sonnet-4-5                  (Sonnet 4.5) ● 当前%b\n" "$RED" "$NC"
+      echo "    2) claude-sonnet-4-5-20250929        (Sonnet 4.5 快照)"
+      echo "    3) claude-sonnet-4-5-thinking        (Sonnet 4.5 思考)"
+      echo "    4) claude-sonnet-4-5-20250929-thinking (快照+思考)"
+      echo "    5) claude-haiku-4-5-20251001         (Haiku 4.5)"
+      echo "    6) claude-sonnet-4-20250514          (Sonnet 4)"
+      echo "    7) 手动输入模型名称"
+      echo "    b) 返回主菜单"
+      echo ""
+      read -p "  输入选项 (1-7/b/↵): " model_choice
+
+      case "$model_choice" in
+        1) CUSTOM_MODEL="claude-sonnet-4-5" ;;
+        2) CUSTOM_MODEL="claude-sonnet-4-5-20250929" ;;
+        3) CUSTOM_MODEL="claude-sonnet-4-5-thinking" ;;
+        4) CUSTOM_MODEL="claude-sonnet-4-5-20250929-thinking" ;;
+        5) CUSTOM_MODEL="claude-haiku-4-5-20251001" ;;
+        6) CUSTOM_MODEL="claude-sonnet-4-20250514" ;;
+        7)
+          read -p "请输入模型名称： " CUSTOM_MODEL
+          ;;
+        b|B)
+          printf "%b已取消%b\n" "$YELLOW" "$NC"
+          echo ""
+          return 1
+          ;;
+        "")
+          CUSTOM_MODEL=""
+          ;;
+        *)
+          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
+          CUSTOM_MODEL=""
+          ;;
+      esac
+  # Claude 中转 (newcli/super, ultra) - Claude 模型（支持 thinking）
   elif [[ "$provider_name" == newcli/* ]]; then
-      printf "    %b1) claude-opus-4-6      (最强) ● 当前%b\n" "$RED" "$NC"
-      echo "    2) claude-sonnet-4-6    (均衡)"
-      echo "    3) claude-haiku-4-5     (快速)"
+      printf "    %b1) claude-opus-4-6            (最强) ● 当前%b\n" "$RED" "$NC"
+      echo "    2) claude-sonnet-4-6          (均衡)"
+      echo "    3) claude-haiku-4-5-20251001  (快速，支持 thinking)"
       echo "    4) 手动输入模型名称"
       echo "    b) 返回主菜单"
       echo ""
@@ -1313,7 +1385,7 @@ show_help() {
   echo "  ~/cc.sh 1 -m claude-sonnet-4-6   # 使用供应商 1，指定 sonnet 模型"
   echo "  ~/cc.sh e                         # 交互式编辑 API Key"
   echo "  ~/cc.sh 6 -m qwen3.5-plus        # 使用供应商 6，指定通义千问模型"
-  echo "  ~/cc.sh 5 -m gpt-5.4             # 使用供应商 5，指定 GPT-5.4 模型"
+  echo "  ~/cc.sh 9 -m gpt-5.4             # 使用供应商 9，指定 GPT-5.4 模型"
   echo ""
 }
 

@@ -405,7 +405,7 @@ EOF
         echo ""
         echo "创建 Agent:"
         echo "  $0 create agent1 1"
-        echo "  $0 create agent2 5 claude-sonnet-4-6"
+        echo "  $0 create agent2 9 claude-sonnet-4-6"
         echo ""
     fi
 
@@ -503,7 +503,7 @@ Claude Code Multi-Agent 管理工具
 示例:
   # 创建两个使用不同供应商的 Agent
   ./cc-agent.sh create agent1 1                    # 使用供应商 1
-  ./cc-agent.sh create agent2 5 claude-sonnet-4-6    # 使用供应商 5，指定模型
+  ./cc-agent.sh create agent2 9 claude-sonnet-4-6    # 使用供应商 9，指定模型
 
   # 同时启动
   ./cc-agent.sh start agent1

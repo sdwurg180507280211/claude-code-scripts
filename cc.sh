@@ -55,8 +55,9 @@ trap _global_cleanup EXIT INT TERM
 mkdir -p "$BACKUP_DIR"
 
 # ── 供应商数据 (唯一数据源) ──
-# 格式: 编号|名称|URL|Token|模型|haiku模型|sonnet模型|small_fast模型
-# haiku/sonnet/small_fast 留空则与主模型相同
+# 格式: 编号|名称|URL|Token|默认模型|haiku模型|sonnet模型|small_fast模型|可选模型列表
+# haiku/sonnet/small_fast 留空则与默认模型相同
+# 可选模型列表用逗号分隔，单项格式：模型[:说明]
 
 # 配置文件路径
 API_KEYS_CONF="$(dirname "${BASH_SOURCE[0]}")/api-keys.conf"
@@ -80,10 +81,11 @@ CUSTOM_MODEL=""
 # ── 从数组解析供应商字段 ──
 _parse_provider() {
   local entry="$1"
-  IFS='|' read -r P_NUM P_NAME P_URL P_TOKEN P_MODEL P_HAIKU P_SONNET P_SMALL <<< "$entry"
+  IFS='|' read -r P_NUM P_NAME P_URL P_TOKEN P_MODEL P_HAIKU P_SONNET P_SMALL P_MODEL_OPTIONS <<< "$entry"
   P_HAIKU="${P_HAIKU:-$P_MODEL}"
   P_SONNET="${P_SONNET:-$P_MODEL}"
   P_SMALL="${P_SMALL:-$P_MODEL}"
+  P_MODEL_OPTIONS="${P_MODEL_OPTIONS:-$P_MODEL}"
 }
 
 # ── 读取当前配置 ──
@@ -360,77 +362,45 @@ show_menu() {
 }
 
 # ── 模型选择菜单 ──
-_model_options_for_provider() {
-  local provider_name="$1"
+_trim() {
+  local value="$1"
+  value="${value%$'\r'}"
+  value="${value#${value%%[![:space:]]*}}"
+  value="${value%${value##*[![:space:]]}}"
+  printf "%s" "$value"
+}
 
-  if [[ "$provider_name" == *"Kimi"* ]]; then
-    cat <<'EOF'
-kimi-k2.5|kimi-k2.5|Kimi 只支持此模型
-EOF
-  elif [[ "$provider_name" == *"DeepSeek"* ]]; then
-    cat <<'EOF'
-deepseek-v4-pro|deepseek-v4-pro|专业版
-deepseek-v4-flash|deepseek-v4-flash|快速版
-EOF
-  elif [[ "$provider_name" == *"火山方舟"* ]]; then
-    cat <<'EOF'
-ark-code-latest|ark-code-latest|最新代码专用
-doubao-seed-2.0-code|doubao-seed-2.0-code|豆码 代码专用
-doubao-seed-2.0-pro|doubao-seed-2.0-pro|豆码 专业版
-doubao-seed-2.0-lite|doubao-seed-2.0-lite|豆码 轻量版
-doubao-seed-code|doubao-seed-code|豆码 旧版
-minimax-m2.5|minimax-m2.5|MiniMax
-glm-4.7|glm-4.7|智谱 GLM
-deepseek-v3.2|deepseek-v3.2|DeepSeek
-kimi-k2.5|kimi-k2.5|Kimi
-EOF
-  elif [[ "$provider_name" == newcli/codex* ]]; then
-    cat <<'EOF'
-gpt-5.5|gpt-5.5|最强
-gpt-5.4|gpt-5.4|均衡
-gpt-5.3-codex|gpt-5.3-codex|代码专用
-gpt-5.2|gpt-5.2|快速
-EOF
-  elif [[ "$provider_name" == newcli/aws* ]]; then
-    cat <<'EOF'
-claude-sonnet-4-5|claude-sonnet-4-5|Sonnet 4.5
-claude-sonnet-4-5-20250929|claude-sonnet-4-5-20250929|Sonnet 4.5 快照
-claude-sonnet-4-5-thinking|claude-sonnet-4-5-thinking|Sonnet 4.5 思考
-claude-sonnet-4-5-20250929-thinking|claude-sonnet-4-5-20250929-thinking|快照+思考
-claude-haiku-4-5-20251001|claude-haiku-4-5-20251001|Haiku 4.5
-claude-sonnet-4-20250514|claude-sonnet-4-20250514|Sonnet 4
-EOF
-  elif [[ "$provider_name" == newcli/* ]]; then
-    cat <<'EOF'
-claude-opus-4-6|claude-opus-4-6|最强
-claude-sonnet-4-6|claude-sonnet-4-6|均衡
-claude-haiku-4-5-20251001|claude-haiku-4-5-20251001|快速，支持 thinking
-EOF
-  elif [[ "$provider_name" == *"PuCode"* || "$provider_name" == *"LinkAPI"* ]]; then
-    cat <<'EOF'
-gpt-5.5|gpt-5.5|GPT 主模型
-gpt-5.3-codex|gpt-5.3-codex|GPT 代码专用
-gpt-5-mini|gpt-5-mini|GPT 快速
-gpt-5.4|gpt-5.4|GPT 兼容
-gpt-5.2|gpt-5.2|GPT 均衡
-EOF
-  else
-    cat <<'EOF'
-claude-opus-4-6|claude-opus-4-6|最强
-claude-sonnet-4-6|claude-sonnet-4-6|均衡
-claude-haiku-4-5-20251001|claude-haiku-4-5|快速
-gpt-5.4|gpt-5.4|GPT 主模型
-gpt-5.2|gpt-5.2|GPT 均衡
-gpt-5-mini|gpt-5-mini|GPT 快速
-qwen3.5-plus|qwen3.5-plus|通义千问
-kimi-k2.5|kimi-k2.5|Kimi
-EOF
-  fi
+_emit_model_options() {
+  local options="$1"
+  local default_model="$2"
+  local item value description
+
+  options="${options:-$default_model}"
+  while [[ -n "$options" ]]; do
+    item="${options%%,*}"
+    if [[ "$options" == *,* ]]; then
+      options="${options#*,}"
+    else
+      options=""
+    fi
+
+    item=$(_trim "$item")
+    [[ -z "$item" ]] && continue
+
+    if [[ "$item" == *:* ]]; then
+      value=$(_trim "${item%%:*}")
+      description=$(_trim "${item#*:}")
+    else
+      value="$item"
+      description="可选"
+    fi
+    printf "%s|%s|%s\n" "$value" "$value" "$description"
+  done
 }
 
 _choose_model() {
-  local provider_name="$1"
-  local default_model="$2"
+  local default_model="$1"
+  local model_options="$2"
   local manual_key="${3:-}"
   local values=() labels=() descriptions=()
   local value label description count=0 seen_default=0
@@ -442,7 +412,7 @@ _choose_model() {
     labels[$count]="$label"
     descriptions[$count]="$description"
     count=$((count + 1))
-  done < <(_model_options_for_provider "$provider_name")
+  done < <(_emit_model_options "$model_options" "$default_model")
 
   if [[ $seen_default -eq 0 ]]; then
     values[$count]="$default_model"
@@ -521,7 +491,7 @@ ask_for_model() {
 
   local manual_key=""
   [[ "$provider_name" == *"火山方舟"* ]] && manual_key="0"
-  _choose_model "$provider_name" "$default_model" "$manual_key" || return 1
+  _choose_model "$default_model" "$P_MODEL_OPTIONS" "$manual_key" || return 1
 
   if [[ -n "$CUSTOM_MODEL" ]]; then
     printf "使用模型：%b%s%b\n" "$GREEN" "$CUSTOM_MODEL" "$NC"

@@ -124,18 +124,15 @@ is_agent_running() {
 
 # 获取 Agent 状态统计
 get_agent_stats() {
-    local -n total=$1
-    local -n running=$2
-    total=0
-    running=0
-
     local -a agents=()
+    local running_count=0
     get_agents agents
-    total=${#agents[@]}
 
     for name in "${agents[@]}"; do
-        is_agent_running "$name" && ((running++))
+        is_agent_running "$name" && ((running_count++))
     done
+
+    printf "%s|%s" "${#agents[@]}" "$running_count"
 }
 
 # ── 供应商相关函数 ──
@@ -221,8 +218,10 @@ show_header() {
 
 # 显示菜单选项（带状态统计）
 show_menu() {
-    local total=0 running=0
-    get_agent_stats total running
+    local total=0 running=0 stats
+    stats=$(get_agent_stats)
+    total=${stats%%|*}
+    running=${stats#*|}
 
     printf "\n"
     if [[ $total -gt 0 ]]; then
@@ -239,6 +238,7 @@ show_menu() {
     printf "  \e[0;32m6)\e[0m 删除 Agent\n"
     printf "  \e[0;32m7)\e[0m 查看 Agent 日志\n"
     printf "  \e[0;32m8)\e[0m 批量操作\n"
+    printf "  \e[0;32m9)\e[0m 供应商/模型配置管理\n"
     printf "\n"
     printf "  \e[1;33m0)\e[0m 退出\n"
     printf "\n"
@@ -315,6 +315,63 @@ select_agent() {
 }
 
 # ── 菜单功能函数 ──
+
+run_cc_config_command() {
+    local title="$1"
+    shift
+    clear_screen
+    show_header
+    echo -e "${BOLD}${title}${NC}"
+    echo ""
+
+    if [[ ! -x "$SCRIPT_DIR/cc.sh" ]]; then
+        echo -e "${RED}错误: 找不到可执行脚本 $SCRIPT_DIR/cc.sh${NC}"
+        pause
+        return
+    fi
+
+    "$SCRIPT_DIR/cc.sh" "$@"
+    pause
+}
+
+menu_config_management() {
+    while true; do
+        clear_screen
+        show_header
+        echo -e "${BOLD}供应商/模型配置管理${NC}"
+        echo ""
+        echo "  1) 查看供应商列表"
+        echo "  2) 新增供应商"
+        echo "  3) 修改供应商"
+        echo "  4) 删除供应商"
+        echo "  5) 查看供应商模型"
+        echo "  6) 新增模型"
+        echo "  7) 修改模型"
+        echo "  8) 删除模型"
+        echo ""
+        echo "  q) 返回上一级"
+        echo ""
+
+        local choice
+        read -r -p "输入选项: " choice
+
+        case "$choice" in
+            1) run_cc_config_command "查看供应商列表" list ;;
+            2) run_cc_config_command "新增供应商" provider-add ;;
+            3) run_cc_config_command "修改供应商" provider-edit ;;
+            4) run_cc_config_command "删除供应商" provider-delete ;;
+            5) run_cc_config_command "查看供应商模型" model-list ;;
+            6) run_cc_config_command "新增模型" model-add ;;
+            7) run_cc_config_command "修改模型" model-edit ;;
+            8) run_cc_config_command "删除模型" model-delete ;;
+            0|q|Q) return ;;
+            *)
+                echo -e "${RED}无效选项，请重新选择${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
 
 # 菜单：创建新 Agent
 menu_create_agent() {
@@ -636,7 +693,7 @@ main_loop() {
         show_header
         show_menu
 
-        read -r -p "输入选项 (0-8): " choice
+        read -r -p "输入选项 (0-9): " choice
 
         case "$choice" in
             1) menu_create_agent ;;
@@ -647,6 +704,7 @@ main_loop() {
             6) menu_remove_agent ;;
             7) menu_view_logs ;;
             8) menu_batch ;;
+            9) menu_config_management ;;
             0)
                 clear_screen
                 echo -e "${GREEN}再见!${NC}"

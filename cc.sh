@@ -115,34 +115,15 @@ _find_provider() {
   return 1
 }
 
-# ── gum 辅助函数 ──
-_has_gum() {
-  command -v gum &>/dev/null
-}
-
-_gum_header() {
-  local title="$1"
-  if _has_gum; then
-    gum style --border rounded --border-foreground 99 --padding "0 2" --bold "$title"
-  else
-    printf "%b╔══════════════════════════════════════════════════╗%b\n" "$CYAN" "$NC"
-    printf "%b║  %-46s║%b\n" "$CYAN" "$title" "$NC"
-    printf "%b╚══════════════════════════════════════════════════╝%b\n" "$CYAN" "$NC"
-  fi
-}
-
+# ── 输出辅助函数 ──
 _gum_log() {
   local level="$1" msg="$2"
-  if _has_gum; then
-    gum log --level "$level" "$msg"
-  else
-    case "$level" in
-      info) printf "%b✓ %s%b\n" "$GREEN" "$msg" "$NC" ;;
-      warn) printf "%b⚠ %s%b\n" "$YELLOW" "$msg" "$NC" ;;
-      error) printf "%b✗ %s%b\n" "$RED" "$msg" "$NC" ;;
-      *) echo "$msg" ;;
-    esac
-  fi
+  case "$level" in
+    info) printf "%b✓ %s%b\n" "$GREEN" "$msg" "$NC" ;;
+    warn) printf "%b⚠ %s%b\n" "$YELLOW" "$msg" "$NC" ;;
+    error) printf "%b✗ %s%b\n" "$RED" "$msg" "$NC" ;;
+    *) echo "$msg" ;;
+  esac
 }
 
 # ── 生成 settings.json ──
@@ -192,7 +173,7 @@ sys.stdout.write("\n")
 
 # ── 显示当前配置 ──
 show_status() {
-  _gum_header "📊 Claude Code 当前配置"
+  printf "%b📊 Claude Code 当前配置%b\n" "$CYAN" "$NC"
   echo ""
 
   if [[ ! -f "$CLAUDE_SETTINGS" ]]; then
@@ -293,43 +274,6 @@ switch_provider() {
 }
 
 # ── 动态菜单 ──
-_provider_category() {
-  local name="$1"
-  if [[ "$name" == newcli/* ]]; then
-    PROVIDER_CATEGORY="foxcode"
-  elif [[ "$name" == *"Kimi"* || "$name" == *"阿里云"* || "$name" == *"火山方舟"* || "$name" == *"DeepSeek"* ]]; then
-    PROVIDER_CATEGORY="domestic"
-  else
-    PROVIDER_CATEGORY="other"
-  fi
-}
-
-_print_provider_menu_item() {
-  local current_url="$1"
-  if [[ "$current_url" == "$P_URL" ]]; then
-    printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
-  else
-    printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
-  fi
-}
-
-_render_provider_group() {
-  local category="$1"
-  local title="$2"
-  local suffix="$3"
-  local current_url="$4"
-  local entry
-
-  printf "  %b▸ %s%b%s\n" "$BLUE" "$title" "$NC" "$suffix"
-  for entry in "${PROVIDERS[@]}"; do
-    _parse_provider "$entry"
-    _provider_category "$P_NAME"
-    [[ "$PROVIDER_CATEGORY" == "$category" ]] || continue
-    _print_provider_menu_item "$current_url"
-  done
-  echo ""
-}
-
 show_menu() {
   # 获取当前供应商 URL
   local current_url=""
@@ -337,27 +281,20 @@ show_menu() {
     current_url=""
   fi
 
-  local divider=$(printf "%b────────────────────────────────────────────────────────────────────────────────%b" "$DIM" "$NC")
-
-  _gum_header "🔧 Claude Code 供应商切换工具"
-  echo ""
   printf "  %b说明:%b 输入编号切换供应商，e 编辑 API Key，q 退出\n" "$DIM" "$NC"
   echo ""
 
-  # 分类显示供应商
-  printf "%b【分类选择】%b\n" "$CYAN" "$NC"
+  printf "%b【供应商】%b\n" "$CYAN" "$NC"
   echo ""
 
-  _render_provider_group "foxcode" "FoxCode 中转" " (newcli, 共用 token)" "$current_url"
-  _render_provider_group "domestic" "国内模型" " (Kimi / Qwen / 火山 / DeepSeek)" "$current_url"
-  _render_provider_group "other" "其它供应商" "" "$current_url"
-
-  echo "$divider"
-  echo ""
-  printf "  %b【功能选项】%b\n" "$CYAN" "$NC"
-  echo ""
-  printf "    %be%b) ✏️ 编辑 API Key        %bq%b) 退出\n" "$YELLOW" "$NC" "$RED" "$NC"
-  printf "    %b[↵]%b 使用当前配置重启\n" "$DIM" "$NC"
+  for entry in "${PROVIDERS[@]}"; do
+    _parse_provider "$entry"
+    if [[ "$current_url" == "$P_URL" ]]; then
+      printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
+    else
+      printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
+    fi
+  done
   echo ""
 }
 
@@ -514,7 +451,7 @@ _mask_token() {
 
 edit_provider_token() {
   echo ""
-  _gum_header "✏️ 编辑供应商 API Key"
+  printf "%b✏️ 编辑供应商 API Key%b\n" "$CYAN" "$NC"
   echo ""
 
   # 列出所有供应商供选择

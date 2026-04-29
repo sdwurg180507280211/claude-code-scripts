@@ -6,7 +6,7 @@
 #   1-N: 直接选择对应供应商
 #   0/test: 速度测试
 #   status: 查看当前配置
-#   -m <model>: 指定模型（不指定默认为 claude-opus-4-6）
+#   -m <model>: 指定模型（不指定则使用供应商默认模型）
 
 set -e
 set -o pipefail
@@ -77,7 +77,6 @@ fi
 
 PROVIDER_COUNT=${#PROVIDERS[@]}
 TEST_TIMEOUT=8
-DEFAULT_MODEL="claude-opus-4-6"
 CUSTOM_MODEL=""
 
 # ── 从数组解析供应商字段 ──
@@ -89,15 +88,14 @@ _parse_provider() {
   P_SMALL="${P_SMALL:-$P_MODEL}"
 }
 
-# ── 构建认证 header 参数到数组 ──
-# 使用 nameref 直接修改传入的数组
+# ── 构建认证 header 参数 ──
 _build_auth_args() {
-  local -n _arr="$1"
-  local token="$2"
+  local token="$1"
+  auth_header_args=()
   if [[ "$token" == aicoding-* ]]; then
-    _arr=(-H "Authorization: ${token}")
+    auth_header_args=(-H "Authorization: ${token}")
   else
-    _arr=(-H "x-api-key: ${token}" -H "Authorization: Bearer ${token}")
+    auth_header_args=(-H "x-api-key: ${token}" -H "Authorization: Bearer ${token}")
   fi
 }
 
@@ -123,46 +121,6 @@ try:
 except Exception as e:
   print('ERROR', str(e), file=sys.stderr)
   sys.exit(1)
-" 2>/dev/null
-}
-
-# ── 获取供应商模型列表 ──
-fetch_models() {
-  local num="$1"
-  local entry
-  entry=$(_find_provider "$num") || return 1
-  _parse_provider "$entry"
-
-  local models_url
-  models_url=$(_build_api_url "$P_URL" "models")
-
-  local -a auth_args
-  _build_auth_args auth_args "$P_TOKEN"
-
-  local raw
-  raw=$(curl -s --max-time 5 -X GET "$models_url" "${auth_args[@]}" 2>/dev/null)
-
-  # 解析模型列表 (通过环境变量传递，避免转义问题)
-  RAW_RESPONSE="$raw" python3 -c "
-import os, json
-try:
-    raw = os.environ.get('RAW_RESPONSE', '{}')
-    d = json.loads(raw)
-    if 'data' in d:
-        models = [m.get('id', '') for m in d['data'] if m.get('id')]
-        models.sort()
-        print('|'.join(models))
-    elif isinstance(d, list):
-        models = []
-        for m in d:
-            if isinstance(m, dict) and m.get('id'):
-                models.append(m.get('id'))
-            elif m:
-                models.append(str(m))
-        models.sort()
-        print('|'.join(models))
-except Exception as e:
-    pass
 " 2>/dev/null
 }
 
@@ -212,59 +170,50 @@ _gum_log() {
 # ── 生成 settings.json ──
 generate_config() {
   _parse_provider "$1"
-  local model="${CUSTOM_MODEL:-$DEFAULT_MODEL}"
+  local model="${CUSTOM_MODEL:-$P_MODEL}"
   local haiku_model="$P_HAIKU"
   local sonnet_model="$P_SONNET"
   local small_fast_model="$P_SMALL"
 
-  [[ -n "$CUSTOM_MODEL" ]] && haiku_model="$CUSTOM_MODEL"
-  [[ -n "$CUSTOM_MODEL" ]] && sonnet_model="$CUSTOM_MODEL"
-  [[ -n "$CUSTOM_MODEL" ]] && small_fast_model="$CUSTOM_MODEL"
+  if [[ -n "$CUSTOM_MODEL" ]]; then
+    haiku_model="$CUSTOM_MODEL"
+    sonnet_model="$CUSTOM_MODEL"
+    small_fast_model="$CUSTOM_MODEL"
+  fi
 
-  cat <<EOF
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "${P_URL}",
-    "ANTHROPIC_AUTH_TOKEN": "${P_TOKEN}",
-    "ANTHROPIC_MODEL": "${model}",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${haiku_model}",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "${sonnet_model}",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "${model}",
-    "ANTHROPIC_SMALL_FAST_MODEL": "${small_fast_model}",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  },
-  "model": "opus",
-  "skipDangerousModePermissionPrompt": true
+  ANTHROPIC_BASE_URL="$P_URL" \
+  ANTHROPIC_AUTH_TOKEN="$P_TOKEN" \
+  ANTHROPIC_MODEL="$model" \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL="$haiku_model" \
+  ANTHROPIC_DEFAULT_SONNET_MODEL="$sonnet_model" \
+  ANTHROPIC_DEFAULT_OPUS_MODEL="$model" \
+  ANTHROPIC_SMALL_FAST_MODEL="$small_fast_model" \
+  python3 -c '
+import json
+import os
+import sys
+
+settings = {
+    "env": {
+        "ANTHROPIC_BASE_URL": os.environ["ANTHROPIC_BASE_URL"],
+        "ANTHROPIC_AUTH_TOKEN": os.environ["ANTHROPIC_AUTH_TOKEN"],
+        "ANTHROPIC_MODEL": os.environ["ANTHROPIC_MODEL"],
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+        "ANTHROPIC_SMALL_FAST_MODEL": os.environ["ANTHROPIC_SMALL_FAST_MODEL"],
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    },
+    "model": "opus",
+    "skipDangerousModePermissionPrompt": True,
 }
-EOF
+json.dump(settings, sys.stdout, ensure_ascii=False, indent=2)
+sys.stdout.write("\n")
+'
 }
 
 # ── 速度测试 ──
 _get_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000'; }
-
-_parse_response() {
-  python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    if 'content' in d and len(d['content']) > 0:
-        texts = [c.get('text','') for c in d['content'] if c.get('type') == 'text']
-        reply = ' '.join(texts).strip()[:80]
-        model = d.get('model', '?')
-        tok_in = d.get('usage', {}).get('input_tokens', '?')
-        tok_out = d.get('usage', {}).get('output_tokens', '?')
-        print(f'OK|{model}|{tok_in}|{tok_out}|{reply}')
-    elif 'error' in d:
-        e = d['error']
-        msg = e.get('message', str(e)) if isinstance(e, dict) else str(e)
-        print(f'ERR|{msg[:120]}')
-    else:
-        print(f'ERR|{json.dumps(d)[:120]}')
-except Exception as ex:
-    raw = sys.stdin.read().strip()
-    print(f'ERR|{raw[:120] if raw else str(ex)[:120]}')
-" 2>/dev/null
-}
 
 # 计算字符串显示宽度（中文=2，英文=1）
 _display_width() {
@@ -428,8 +377,8 @@ _test_one_round() {
   local test_url
   test_url=$(_build_api_url "$P_URL" "messages")
 
-  local -a auth_args
-  _build_auth_args auth_args "$P_TOKEN"
+  local -a auth_header_args
+  _build_auth_args "$P_TOKEN"
 
   local start=$(_get_ms)
   local tmp_out=$(mktemp)
@@ -440,10 +389,9 @@ _test_one_round() {
     -X POST "$test_url" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    "${auth_args[@]}" \
+    "${auth_header_args[@]}" \
     -d "{\"model\":\"${P_MODEL}\",\"max_tokens\":30,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Say ok\"}]}" 2>/dev/null \
   | _parse_stream_response "$start" > "$tmp_out" 2>/dev/null
-  local pipe_status=${PIPESTATUS[0]}
   local total=$(( $(_get_ms) - start ))
 
   local parsed
@@ -514,6 +462,14 @@ _test_one_live() {
 
 # ── 功能验证（模拟 Claude Code 真实请求）──
 VERIFY_TIMEOUT=30
+
+_read_verify_lines() {
+  parsed_lines=()
+  local line
+  while IFS= read -r line; do
+    parsed_lines+=("$line")
+  done
+}
 
 _verify_response() {
   python3 -c "
@@ -588,8 +544,8 @@ list_models_provider() {
   local models_url
   models_url=$(_build_api_url "$P_URL" "models")
 
-  local -a auth_args
-  _build_auth_args auth_args "$P_TOKEN"
+  local -a auth_header_args
+  _build_auth_args "$P_TOKEN"
 
   printf "\n  %b[%s]%b %s\n" "$CYAN" "$P_NUM" "$NC" "$P_NAME"
   printf "  端点: %s\n" "$models_url"
@@ -599,7 +555,7 @@ list_models_provider() {
     -X GET "$models_url" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    "${auth_args[@]}" 2>&1)
+    "${auth_header_args[@]}" 2>&1)
   local duration=$(( $(_get_ms) - start ))
   local http_code=$(echo "$raw" | tail -1)
   local body=$(echo "$raw" | sed '$d')
@@ -680,8 +636,8 @@ verify_provider() {
   test_url=$(_build_api_url "$P_URL" "messages")
 
   # 根据 token 格式选择 auth headers
-  local -a auth_args
-  _build_auth_args auth_args "$P_TOKEN"
+  local -a auth_header_args
+  _build_auth_args "$P_TOKEN"
 
   printf "\n"
   _gum_header "🔍 功能验证：${P_NAME}"
@@ -694,14 +650,15 @@ verify_provider() {
     -X POST "$test_url" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    "${auth_args[@]}" \
+    "${auth_header_args[@]}" \
     -d "{\"model\":\"${P_MODEL}\",\"max_tokens\":300,\"stream\":false,\"system\":\"You are a coding assistant.\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a bubble sort in Python, just the code.\"}]}" 2>&1)
   local duration=$(( $(_get_ms) - start ))
   local http_code=$(echo "$raw" | tail -1)
   local body=$(echo "$raw" | sed '$d')
-  local parsed_lines
-  mapfile -t parsed_lines < <(echo "$body" | _verify_response)
-  local tag="${parsed_lines[0]}"
+  local -a parsed_lines
+  local tag
+  _read_verify_lines < <(echo "$body" | _verify_response)
+  tag="${parsed_lines[0]}"
   if [[ "$tag" == "TEXT" ]]; then
     local ret_model="${parsed_lines[1]}"
     local reply="${parsed_lines[2]}"
@@ -732,12 +689,12 @@ verify_provider() {
     -X POST "$test_url" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    "${auth_args[@]}" \
+    "${auth_header_args[@]}" \
     -d "$tool_payload" 2>&1)
   duration=$(( $(_get_ms) - start ))
   http_code=$(echo "$raw" | tail -1)
   body=$(echo "$raw" | sed '$d')
-  mapfile -t parsed_lines < <(echo "$body" | _verify_response)
+  _read_verify_lines < <(echo "$body" | _verify_response)
   tag="${parsed_lines[0]}"
   if [[ "$tag" == "TOOL" ]]; then
     local tool_name="${parsed_lines[2]}"
@@ -756,11 +713,11 @@ verify_provider() {
     -X POST "$test_url" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    "${auth_args[@]}" \
+    "${auth_header_args[@]}" \
     -d "{\"model\":\"${P_MODEL}\",\"max_tokens\":10,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" 2>&1)
   http_code=$(echo "$raw" | tail -1)
   body=$(echo "$raw" | sed '$d')
-  mapfile -t parsed_lines < <(echo "$body" | _verify_response)
+  _read_verify_lines < <(echo "$body" | _verify_response)
   tag="${parsed_lines[0]}"
   if [[ "$tag" == "TEXT" || "$tag" == "TOOL" ]]; then
     local ret_model="${parsed_lines[1]}"
@@ -913,15 +870,50 @@ switch_provider() {
 }
 
 # ── 动态菜单 ──
+_provider_category() {
+  local name="$1"
+  if [[ "$name" == newcli/* ]]; then
+    PROVIDER_CATEGORY="foxcode"
+  elif [[ "$name" == *"Kimi"* || "$name" == *"阿里云"* || "$name" == *"火山方舟"* || "$name" == *"DeepSeek"* ]]; then
+    PROVIDER_CATEGORY="domestic"
+  else
+    PROVIDER_CATEGORY="other"
+  fi
+}
+
+_print_provider_menu_item() {
+  local current_url="$1"
+  if [[ "$current_url" == "$P_URL" ]]; then
+    printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
+  else
+    printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
+  fi
+}
+
+_render_provider_group() {
+  local category="$1"
+  local title="$2"
+  local suffix="$3"
+  local current_url="$4"
+  local entry
+
+  printf "  %b▸ %s%b%s\n" "$BLUE" "$title" "$NC" "$suffix"
+  for entry in "${PROVIDERS[@]}"; do
+    _parse_provider "$entry"
+    _provider_category "$P_NAME"
+    [[ "$PROVIDER_CATEGORY" == "$category" ]] || continue
+    _print_provider_menu_item "$current_url"
+  done
+  echo ""
+}
+
 show_menu() {
   # 获取当前供应商 URL
   local current_url=""
-  if [[ -f "$CLAUDE_SETTINGS" ]]; then
-    read -r current_url _ < <(_read_current_config)
+  if ! read -r current_url _ < <(_read_current_config); then
+    current_url=""
   fi
 
-  # 计算列宽
-  local term_width=${COLUMNS:-80}
   local divider=$(printf "%b────────────────────────────────────────────────────────────────────────────────%b" "$DIM" "$NC")
 
   _gum_header "🔧 Claude Code 供应商切换工具"
@@ -933,41 +925,9 @@ show_menu() {
   printf "%b【分类选择】%b\n" "$CYAN" "$NC"
   echo ""
 
-  # ── FoxCode 中转 (newcli 系列)
-  printf "  %b▸ FoxCode 中转%b (newcli, 共用 token)\n" "$BLUE" "$NC"
-  for entry in "${PROVIDERS[@]:0:4}"; do
-    _parse_provider "$entry"
-    if [[ "$current_url" == "$P_URL" ]]; then
-      printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
-    else
-      printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
-    fi
-  done
-  echo ""
-
-  # ── 国内模型
-  printf "  %b▸ 国内模型%b (Kimi / Qwen / 火山 / DeepSeek)\n" "$BLUE" "$NC"
-  for entry in "${PROVIDERS[@]:4:4}"; do
-    _parse_provider "$entry"
-    if [[ "$current_url" == "$P_URL" ]]; then
-      printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
-    else
-      printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
-    fi
-  done
-  echo ""
-
-  # ── 其它供应商
-  printf "  %b▸ 其它供应商%b\n" "$BLUE" "$NC"
-  for entry in "${PROVIDERS[@]:8:2}"; do
-    _parse_provider "$entry"
-    if [[ "$current_url" == "$P_URL" ]]; then
-      printf "    %b[%s] %s ● 当前%b\n" "$RED" "$P_NUM" "$P_NAME" "$NC"
-    else
-      printf "    [%s] %s\n" "$P_NUM" "$P_NAME"
-    fi
-  done
-  echo ""
+  _render_provider_group "foxcode" "FoxCode 中转" " (newcli, 共用 token)" "$current_url"
+  _render_provider_group "domestic" "国内模型" " (Kimi / Qwen / 火山 / DeepSeek)" "$current_url"
+  _render_provider_group "other" "其它供应商" "" "$current_url"
 
   echo "$divider"
   echo ""
@@ -980,9 +940,155 @@ show_menu() {
 }
 
 # ── 模型选择菜单 ──
+_model_options_for_provider() {
+  local provider_name="$1"
+
+  if [[ "$provider_name" == *"Kimi"* ]]; then
+    cat <<'EOF'
+kimi-k2.5|kimi-k2.5|Kimi 只支持此模型
+EOF
+  elif [[ "$provider_name" == *"DeepSeek"* ]]; then
+    cat <<'EOF'
+deepseek-v4-pro|deepseek-v4-pro|专业版
+deepseek-v4-flash|deepseek-v4-flash|快速版
+EOF
+  elif [[ "$provider_name" == *"火山方舟"* ]]; then
+    cat <<'EOF'
+ark-code-latest|ark-code-latest|最新代码专用
+doubao-seed-2.0-code|doubao-seed-2.0-code|豆码 代码专用
+doubao-seed-2.0-pro|doubao-seed-2.0-pro|豆码 专业版
+doubao-seed-2.0-lite|doubao-seed-2.0-lite|豆码 轻量版
+doubao-seed-code|doubao-seed-code|豆码 旧版
+minimax-m2.5|minimax-m2.5|MiniMax
+glm-4.7|glm-4.7|智谱 GLM
+deepseek-v3.2|deepseek-v3.2|DeepSeek
+kimi-k2.5|kimi-k2.5|Kimi
+EOF
+  elif [[ "$provider_name" == newcli/codex* ]]; then
+    cat <<'EOF'
+gpt-5.5|gpt-5.5|最强
+gpt-5.4|gpt-5.4|均衡
+gpt-5.3-codex|gpt-5.3-codex|代码专用
+gpt-5.2|gpt-5.2|快速
+EOF
+  elif [[ "$provider_name" == newcli/aws* ]]; then
+    cat <<'EOF'
+claude-sonnet-4-5|claude-sonnet-4-5|Sonnet 4.5
+claude-sonnet-4-5-20250929|claude-sonnet-4-5-20250929|Sonnet 4.5 快照
+claude-sonnet-4-5-thinking|claude-sonnet-4-5-thinking|Sonnet 4.5 思考
+claude-sonnet-4-5-20250929-thinking|claude-sonnet-4-5-20250929-thinking|快照+思考
+claude-haiku-4-5-20251001|claude-haiku-4-5-20251001|Haiku 4.5
+claude-sonnet-4-20250514|claude-sonnet-4-20250514|Sonnet 4
+EOF
+  elif [[ "$provider_name" == newcli/* ]]; then
+    cat <<'EOF'
+claude-opus-4-6|claude-opus-4-6|最强
+claude-sonnet-4-6|claude-sonnet-4-6|均衡
+claude-haiku-4-5-20251001|claude-haiku-4-5-20251001|快速，支持 thinking
+EOF
+  elif [[ "$provider_name" == *"PuCode"* || "$provider_name" == *"LinkAPI"* ]]; then
+    cat <<'EOF'
+gpt-5.5|gpt-5.5|GPT 主模型
+gpt-5.3-codex|gpt-5.3-codex|GPT 代码专用
+gpt-5-mini|gpt-5-mini|GPT 快速
+gpt-5.4|gpt-5.4|GPT 兼容
+gpt-5.2|gpt-5.2|GPT 均衡
+EOF
+  else
+    cat <<'EOF'
+claude-opus-4-6|claude-opus-4-6|最强
+claude-sonnet-4-6|claude-sonnet-4-6|均衡
+claude-haiku-4-5-20251001|claude-haiku-4-5|快速
+gpt-5.4|gpt-5.4|GPT 主模型
+gpt-5.2|gpt-5.2|GPT 均衡
+gpt-5-mini|gpt-5-mini|GPT 快速
+qwen3.5-plus|qwen3.5-plus|通义千问
+kimi-k2.5|kimi-k2.5|Kimi
+EOF
+  fi
+}
+
+_choose_model() {
+  local provider_name="$1"
+  local default_model="$2"
+  local manual_key="${3:-}"
+  local values=() labels=() descriptions=()
+  local value label description count=0 seen_default=0
+
+  while IFS='|' read -r value label description; do
+    [[ -z "$value" ]] && continue
+    [[ "$value" == "$default_model" ]] && seen_default=1
+    values[$count]="$value"
+    labels[$count]="$label"
+    descriptions[$count]="$description"
+    count=$((count + 1))
+  done < <(_model_options_for_provider "$provider_name")
+
+  if [[ $seen_default -eq 0 ]]; then
+    values[$count]="$default_model"
+    labels[$count]="$default_model"
+    descriptions[$count]="供应商默认"
+    count=$((count + 1))
+  fi
+
+  [[ -z "$manual_key" ]] && manual_key=$((count + 1))
+
+  local i=0 marker line
+  while [[ $i -lt $count ]]; do
+    marker=""
+    [[ "${values[$i]}" == "$default_model" ]] && marker=" ● 当前"
+    line=$(printf "    %d) %-28s (%s)%s" "$((i + 1))" "${labels[$i]}" "${descriptions[$i]}" "$marker")
+    if [[ -n "$marker" ]]; then
+      printf "%b%s%b\n" "$RED" "$line" "$NC"
+    else
+      printf "%s\n" "$line"
+    fi
+    i=$((i + 1))
+  done
+  echo "    ${manual_key}) 手动输入模型名称"
+  echo "    b) 返回主菜单"
+  echo ""
+
+  local range="1-${count}"
+  if [[ "$manual_key" == "0" ]]; then
+    range="${range}/0"
+  else
+    range="1-${manual_key}"
+  fi
+
+  local model_choice
+  read -r -p "  输入选项 (${range}/b/↵): " model_choice
+
+  case "$model_choice" in
+    b|B)
+      printf "%b已取消%b\n" "$YELLOW" "$NC"
+      echo ""
+      return 1
+      ;;
+    "")
+      CUSTOM_MODEL=""
+      ;;
+    "$manual_key")
+      read -r -p "请输入模型名称： " CUSTOM_MODEL
+      ;;
+    *)
+      if [[ "$model_choice" =~ ^[0-9]+$ ]] && [[ "$model_choice" -ge 1 ]] && [[ "$model_choice" -le "$count" ]]; then
+        CUSTOM_MODEL="${values[$((model_choice - 1))]}"
+      else
+        printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
+        CUSTOM_MODEL=""
+      fi
+      ;;
+  esac
+}
+
 ask_for_model() {
   local provider_num="$1"
   local provider_name="$2"
+  local entry
+  entry=$(_find_provider "$provider_num") || return 1
+  _parse_provider "$entry"
+  local default_model="$P_MODEL"
 
   echo ""
   printf "%b┌─────────────────────────────────────────────────────┐%b\n" "$CYAN" "$NC"
@@ -990,375 +1096,117 @@ ask_for_model() {
   printf "%b└─────────────────────────────────────────────────────┘%b\n" "$CYAN" "$NC"
   echo ""
 
-  # 根据供应商类型设置默认模型
-  local actual_default="$DEFAULT_MODEL"
-  if [[ "$provider_name" == newcli/codex* ]]; then
-      actual_default="gpt-5.5"
-  elif [[ "$provider_name" == newcli/aws* ]]; then
-      actual_default="claude-sonnet-4-5"
-  elif [[ "$provider_name" == newcli/* ]]; then
-      actual_default="claude-opus-4-6"
-  elif [[ "$provider_name" == *"PuCode"* || "$provider_name" == *"LinkAPI"* ]]; then
-      actual_default="gpt-5.4"
-  elif [[ "$provider_name" == *"阿里云"* ]]; then
-      actual_default="qwen3.5-plus"
-  elif [[ "$provider_name" == *"火山方舟"* ]]; then
-      actual_default="ark-code-latest"
-  elif [[ "$provider_name" == *"DeepSeek"* ]]; then
-      actual_default="deepseek-v4-pro"
-  fi
-
-  printf "  请选择模型 %b[默认：%s]%b:\n" "$DIM" "$actual_default" "$NC"
+  printf "  请选择模型 %b[默认：%s]%b:\n" "$DIM" "$default_model" "$NC"
   echo ""
 
-  # Kimi 只支持 kimi-k2.5，直接使用，不需要选择
-  if [[ "$provider_name" == *"Kimi"* ]]; then
-      CUSTOM_MODEL="kimi-k2.5"
-      printf "使用模型：%bkimi-k2.5%b (Kimi 只支持此模型)\n" "$GREEN" "$NC"
-      echo ""
-  # DeepSeek 供应商 - 显示专属模型列表
-  elif [[ "$provider_name" == *"DeepSeek"* ]]; then
-      printf "    %b1) deepseek-v4-pro    (专业版) ● 当前%b\n" "$RED" "$NC"
-      echo "    2) deepseek-v4-flash  (快速版)"
-      echo "    3) 手动输入模型名称"
-      echo "    b) 返回主菜单"
-      echo ""
-      read -p "  输入选项 (1-3/b/↵): " model_choice
-
-      case "$model_choice" in
-        1) CUSTOM_MODEL="deepseek-v4-pro" ;;
-        2) CUSTOM_MODEL="deepseek-v4-flash" ;;
-        3)
-          read -p "请输入模型名称： " CUSTOM_MODEL
-          ;;
-        b|B)
-          printf "%b已取消%b\n" "$YELLOW" "$NC"
-          echo ""
-          return 1
-          ;;
-        "")
-          CUSTOM_MODEL=""
-          ;;
-        *)
-          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-          CUSTOM_MODEL=""
-          ;;
-      esac
-  # 火山方舟供应商 - 显示专属模型列表
-  elif [[ "$provider_name" == *"火山方舟"* ]]; then
-      printf "    %b1) ark-code-latest        (最新代码专用) ● 当前%b\n" "$RED" "$NC"
-      echo "    2) doubao-seed-2.0-code  (豆码 代码专用)"
-      echo "    3) doubao-seed-2.0-pro   (豆码 专业版)"
-      echo "    4) doubao-seed-2.0-lite  (豆码 轻量版)"
-      echo "    5) doubao-seed-code       (豆码 旧版)"
-      echo "    6) minimax-m2.5           (MiniMax)"
-      echo "    7) glm-4.7                (智谱 GLM)"
-      echo "    8) deepseek-v3.2          (DeepSeek)"
-      echo "    9) kimi-k2.5              (Kimi)"
-      echo "    0) 手动输入模型名称"
-      echo "    b) 返回主菜单"
-      echo ""
-      read -p "  输入选项 (1-9/0/b/↵): " model_choice
-
-      case "$model_choice" in
-        1) CUSTOM_MODEL="ark-code-latest" ;;
-        2) CUSTOM_MODEL="doubao-seed-2.0-code" ;;
-        3) CUSTOM_MODEL="doubao-seed-2.0-pro" ;;
-        4) CUSTOM_MODEL="doubao-seed-2.0-lite" ;;
-        5) CUSTOM_MODEL="doubao-seed-code" ;;
-        6) CUSTOM_MODEL="minimax-m2.5" ;;
-        7) CUSTOM_MODEL="glm-4.7" ;;
-        8) CUSTOM_MODEL="deepseek-v3.2" ;;
-        9) CUSTOM_MODEL="kimi-k2.5" ;;
-        0)
-          read -p "请输入模型名称： " CUSTOM_MODEL
-          ;;
-        b|B)
-          printf "%b已取消%b\n" "$YELLOW" "$NC"
-          echo ""
-          return 1
-          ;;
-        "")
-          CUSTOM_MODEL=""
-          ;;
-        *)
-          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-          CUSTOM_MODEL=""
-          ;;
-      esac
-  # Codex 渠道 (newcli/codex) - GPT 模型
-  elif [[ "$provider_name" == newcli/codex* ]]; then
-      printf "    %b1) gpt-5.5             (最强) ● 当前%b\n" "$RED" "$NC"
-      echo "    2) gpt-5.4              (均衡)"
-      echo "    3) gpt-5.3-codex        (代码专用)"
-      echo "    4) gpt-5.2              (快速)"
-      echo "    5) 手动输入模型名称"
-      echo "    b) 返回主菜单"
-      echo ""
-      read -p "  输入选项 (1-5/b/↵): " model_choice
-
-      case "$model_choice" in
-        1) CUSTOM_MODEL="gpt-5.5" ;;
-        2) CUSTOM_MODEL="gpt-5.4" ;;
-        3) CUSTOM_MODEL="gpt-5.3-codex" ;;
-        4) CUSTOM_MODEL="gpt-5.2" ;;
-        5)
-          read -p "请输入模型名称： " CUSTOM_MODEL
-          ;;
-        b|B)
-          printf "%b已取消%b\n" "$YELLOW" "$NC"
-          echo ""
-          return 1
-          ;;
-        "")
-          CUSTOM_MODEL=""
-          ;;
-        *)
-          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-          CUSTOM_MODEL=""
-          ;;
-      esac
-  # AWS 特价 (newcli/aws) - AWS 专属 Claude 模型
-  elif [[ "$provider_name" == newcli/aws* ]]; then
-      printf "    %b1) claude-sonnet-4-5                  (Sonnet 4.5) ● 当前%b\n" "$RED" "$NC"
-      echo "    2) claude-sonnet-4-5-20250929        (Sonnet 4.5 快照)"
-      echo "    3) claude-sonnet-4-5-thinking        (Sonnet 4.5 思考)"
-      echo "    4) claude-sonnet-4-5-20250929-thinking (快照+思考)"
-      echo "    5) claude-haiku-4-5-20251001         (Haiku 4.5)"
-      echo "    6) claude-sonnet-4-20250514          (Sonnet 4)"
-      echo "    7) 手动输入模型名称"
-      echo "    b) 返回主菜单"
-      echo ""
-      read -p "  输入选项 (1-7/b/↵): " model_choice
-
-      case "$model_choice" in
-        1) CUSTOM_MODEL="claude-sonnet-4-5" ;;
-        2) CUSTOM_MODEL="claude-sonnet-4-5-20250929" ;;
-        3) CUSTOM_MODEL="claude-sonnet-4-5-thinking" ;;
-        4) CUSTOM_MODEL="claude-sonnet-4-5-20250929-thinking" ;;
-        5) CUSTOM_MODEL="claude-haiku-4-5-20251001" ;;
-        6) CUSTOM_MODEL="claude-sonnet-4-20250514" ;;
-        7)
-          read -p "请输入模型名称： " CUSTOM_MODEL
-          ;;
-        b|B)
-          printf "%b已取消%b\n" "$YELLOW" "$NC"
-          echo ""
-          return 1
-          ;;
-        "")
-          CUSTOM_MODEL=""
-          ;;
-        *)
-          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-          CUSTOM_MODEL=""
-          ;;
-      esac
-  # Claude 中转 (newcli/super, ultra) - Claude 模型（支持 thinking）
-  elif [[ "$provider_name" == newcli/* ]]; then
-      printf "    %b1) claude-opus-4-6            (最强) ● 当前%b\n" "$RED" "$NC"
-      echo "    2) claude-sonnet-4-6          (均衡)"
-      echo "    3) claude-haiku-4-5-20251001  (快速，支持 thinking)"
-      echo "    4) 手动输入模型名称"
-      echo "    b) 返回主菜单"
-      echo ""
-      read -p "  输入选项 (1-4/b/↵): " model_choice
-
-      case "$model_choice" in
-        1) CUSTOM_MODEL="claude-opus-4-6" ;;
-        2) CUSTOM_MODEL="claude-sonnet-4-6" ;;
-        3) CUSTOM_MODEL="claude-haiku-4-5-20251001" ;;
-        4)
-          read -p "请输入模型名称： " CUSTOM_MODEL
-          ;;
-        b|B)
-          printf "%b已取消%b\n" "$YELLOW" "$NC"
-          echo ""
-          return 1
-          ;;
-        "")
-          CUSTOM_MODEL=""
-          ;;
-        *)
-          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-          CUSTOM_MODEL=""
-          ;;
-      esac
-  # GPT 系列 (PuCode, LinkAPI) - 只显示 GPT 模型
-  elif [[ "$provider_name" == *"PuCode"* || "$provider_name" == *"LinkAPI"* ]]; then
-      printf "    %b1) gpt-5.4              (GPT 主模型) ● 当前%b\n" "$RED" "$NC"
-      echo "    2) gpt-5.2              (GPT 均衡)"
-      echo "    3) gpt-5-mini           (GPT 快速)"
-      echo "    4) 手动输入模型名称"
-      echo "    b) 返回主菜单"
-      echo ""
-      read -p "  输入选项 (1-4/b/↵): " model_choice
-
-      case "$model_choice" in
-        1) CUSTOM_MODEL="gpt-5.4" ;;
-        2) CUSTOM_MODEL="gpt-5.2" ;;
-        3) CUSTOM_MODEL="gpt-5-mini" ;;
-        4)
-          read -p "请输入模型名称： " CUSTOM_MODEL
-          ;;
-        b|B)
-          printf "%b已取消%b\n" "$YELLOW" "$NC"
-          echo ""
-          return 1
-          ;;
-        "")
-          CUSTOM_MODEL=""
-          ;;
-        *)
-          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-          CUSTOM_MODEL=""
-          ;;
-      esac
-  else
-      # 其他模型 - 通用菜单
-      if [[ "$provider_name" == *"阿里云"* ]]; then
-        echo "    1) claude-opus-4-6      (最强)"
-        echo "    2) claude-sonnet-4-6    (均衡)"
-        echo "    3) claude-haiku-4-5     (快速)"
-        echo "    4) gpt-5.4              (GPT 主模型)"
-        echo "    5) gpt-5.2              (GPT 均衡)"
-        echo "    6) gpt-5-mini           (GPT 快速)"
-        printf "    %b7) qwen3.5-plus         (通义千问) ● 当前%b\n" "$RED" "$NC"
-        echo "    8) kimi-k2.5            (Kimi)"
-        echo "    9) 手动输入模型名称"
-      else
-        printf "    %b1) claude-opus-4-6      (最强) ● 当前%b\n" "$RED" "$NC"
-        echo "    2) claude-sonnet-4-6    (均衡)"
-        echo "    3) claude-haiku-4-5     (快速)"
-        echo "    4) gpt-5.4              (GPT 主模型)"
-        echo "    5) gpt-5.2              (GPT 均衡)"
-        echo "    6) gpt-5-mini           (GPT 快速)"
-        echo "    7) qwen3.5-plus         (通义千问)"
-        echo "    8) kimi-k2.5            (Kimi)"
-        echo "    9) 手动输入模型名称"
-      fi
-      echo "    b) 返回主菜单"
-      echo ""
-      read -p "  输入选项 (1-9/b/↵): " model_choice
-
-      case "$model_choice" in
-        1) CUSTOM_MODEL="claude-opus-4-6" ;;
-        2) CUSTOM_MODEL="claude-sonnet-4-6" ;;
-        3) CUSTOM_MODEL="claude-haiku-4-5-20251001" ;;
-        4) CUSTOM_MODEL="gpt-5.4" ;;
-        5) CUSTOM_MODEL="gpt-5.2" ;;
-        6) CUSTOM_MODEL="gpt-5-mini" ;;
-        7) CUSTOM_MODEL="qwen3.5-plus" ;;
-        8) CUSTOM_MODEL="kimi-k2.5" ;;
-        9)
-          read -p "请输入模型名称： " CUSTOM_MODEL
-          ;;
-        b|B)
-          printf "%b已取消%b\n" "$YELLOW" "$NC"
-          echo ""
-          return 1
-          ;;
-        "")
-          CUSTOM_MODEL=""
-          ;;
-        *)
-          printf "%b无效选项，使用默认模型%b\n" "$YELLOW" "$NC"
-          CUSTOM_MODEL=""
-          ;;
-      esac
-    fi
+  local manual_key=""
+  [[ "$provider_name" == *"火山方舟"* ]] && manual_key="0"
+  _choose_model "$provider_name" "$default_model" "$manual_key" || return 1
 
   if [[ -n "$CUSTOM_MODEL" ]]; then
     printf "使用模型：%b%s%b\n" "$GREEN" "$CUSTOM_MODEL" "$NC"
   else
-    CUSTOM_MODEL="$actual_default"
-    printf "使用默认模型：%b%s%b\n" "$GREEN" "$CUSTOM_MODEL" "$NC"
+    printf "使用默认模型：%b%s%b\n" "$GREEN" "$default_model" "$NC"
   fi
   echo ""
 }
 
 # ── 编辑供应商 Token ──
+_mask_token() {
+  local token="$1"
+  local len=${#token}
+  if [[ $len -le 16 ]]; then
+    printf "%s" "********"
+  else
+    printf "%s...%s" "${token:0:8}" "${token: -8}"
+  fi
+}
+
 edit_provider_token() {
   echo ""
   _gum_header "✏️ 编辑供应商 API Key"
   echo ""
 
   # 列出所有供应商供选择
-  local count=0
   for entry in "${PROVIDERS[@]}"; do
     _parse_provider "$entry"
     printf "  [%s] %s\n" "$P_NUM" "$P_NAME"
-    : $((count++))
   done
   echo ""
 
-  read -p "请输入要编辑的供应商编号 (1-$count): " edit_num
+  read -r -p "请输入要编辑的供应商编号: " edit_num
 
-  # 验证输入是否为有效数字
-  if [[ ! "$edit_num" =~ ^[0-9]+$ ]] || [[ "$edit_num" -lt 1 ]] || [[ "$edit_num" -gt "$count" ]]; then
+  local target_entry
+  target_entry=$(_find_provider "$edit_num") || {
     _gum_log error "无效的供应商编号"
     echo ""
     return 1
-  fi
-
-  # 找到对应的供应商
-  local target_entry=""
-  for entry in "${PROVIDERS[@]}"; do
-    _parse_provider "$entry"
-    if [[ "$P_NUM" == "$edit_num" ]]; then
-      target_entry="$entry"
-      break
-    fi
-  done
-
-  if [[ -z "$target_entry" ]]; then
-    _gum_log error "找不到该供应商"
-    echo ""
-    return 1
-  fi
+  }
 
   _parse_provider "$target_entry"
 
   echo ""
   echo " 当前供应商: $P_NAME"
-  echo " 当前 API Key: ${P_TOKEN:0:20}...${P_TOKEN: -20}"
+  echo " 当前 API Key: $(_mask_token "$P_TOKEN")"
   echo ""
-  read -p "请输入新的 API Key: " new_token
+  read -r -p "请输入新的 API Key: " new_token
 
   if [[ -z "$new_token" ]]; then
     _gum_log error "API Key 不能为空"
     echo ""
     return 1
   fi
-
-  # 配置文件路径
-  if [[ ! -w "$API_KEYS_CONF" ]]; then
-    _gum_log error "配置文件 $API_KEYS_CONF 不可写，请手动编辑修改"
+  if [[ "$new_token" == *$'\n'* || "$new_token" == *$'\r'* || "$new_token" == *"|"* ]]; then
+    _gum_log error "API Key 不能包含换行或 | 字符"
     echo ""
     return 1
   fi
 
-  # 按 | 分割，替换第四段
-  local n name url _ model haiku sonnet small
-  IFS='|' read -r n name url _ model haiku sonnet small <<< "$target_entry"
+  local tmp_conf
+  tmp_conf=$(mktemp) || { _gum_log error "无法创建临时文件"; return 1; }
+  TEMP_FILES+=("$tmp_conf")
 
-  # 重新构建行
-  local new_line="$n|$name|$url|$new_token|$model|$haiku|$sonnet|$small"
+  if EDIT_NUM="$edit_num" NEW_TOKEN="$new_token" API_KEYS_CONF="$API_KEYS_CONF" python3 - "$tmp_conf" <<'PY'
+import os
+import sys
 
-  # 使用 sed 替换整行
-  if [[ "$(uname)" == "Darwin" ]]; then
-    sed -i '' "s#^$edit_num|.*#$new_line#" "$API_KEYS_CONF"
-  else
-    sed -i "s#^$edit_num|.*#$new_line#" "$API_KEYS_CONF"
-  fi
+src = os.environ["API_KEYS_CONF"]
+target = os.environ["EDIT_NUM"]
+new_token = os.environ["NEW_TOKEN"]
+dst = sys.argv[1]
+updated = False
 
-  if [[ $? -eq 0 ]]; then
+with open(src, "r", encoding="utf-8") as fh, open(dst, "w", encoding="utf-8") as out:
+    for line in fh:
+        raw = line.rstrip("\n")
+        newline = "\n" if line.endswith("\n") else ""
+        if raw and not raw.lstrip().startswith("#"):
+            parts = raw.split("|")
+            if parts and parts[0] == target:
+                if len(parts) < 4:
+                    raise SystemExit("目标供应商配置格式错误")
+                parts[3] = new_token
+                raw = "|".join(parts)
+                updated = True
+        out.write(raw + newline)
+
+if not updated:
+    raise SystemExit("未找到目标供应商")
+PY
+  then
+    if ! mv "$tmp_conf" "$API_KEYS_CONF"; then
+      rm -f "$tmp_conf"
+      _gum_log error "修改失败，请手动编辑配置文件"
+      echo ""
+      return 1
+    fi
     _gum_log info "✓ API Key 更新成功！需要重新加载脚本生效"
     echo ""
     echo "修改已写入: $API_KEYS_CONF"
     echo "下次运行脚本将使用新的 API Key"
     echo ""
   else
+    rm -f "$tmp_conf"
     _gum_log error "修改失败，请手动编辑配置文件"
     echo ""
   fi
@@ -1379,7 +1227,7 @@ show_help() {
   echo "  ~/cc.sh models    # 查询所有供应商可用模型"
   echo "  ~/cc.sh models 1  # 查询指定供应商可用模型"
   echo "  ~/cc.sh status    # 查看当前配置"
-  echo "  ~/cc.sh -m <model>   # 指定模型 (默认：claude-opus-4-6)"
+  echo "  ~/cc.sh -m <model>   # 指定模型 (不指定则使用供应商默认模型)"
   echo ""
   echo "示例:"
   echo "  ~/cc.sh 1 -m claude-sonnet-4-6   # 使用供应商 1，指定 sonnet 模型"
@@ -1389,28 +1237,11 @@ show_help() {
   echo ""
 }
 
-# ── 后台测速 + 前台选择 ──
-_bg_speed_test_pid=""
-
-_cleanup_bg_test() {
-  if [[ -n "$_bg_speed_test_pid" ]] && kill -0 "$_bg_speed_test_pid" 2>/dev/null; then
-    kill "$_bg_speed_test_pid" 2>/dev/null
-    wait "$_bg_speed_test_pid" 2>/dev/null
-  fi
-  _bg_speed_test_pid=""
-}
-
-# 后台测速：结果实时打印，不阻塞用户输入
-run_speed_test_bg() {
-  _cleanup_bg_test
-  run_speed_test &
-  _bg_speed_test_pid=$!
-}
-
 # ── 主函数 ──
 main() {
-  trap '_cleanup_bg_test; _global_cleanup' EXIT INT TERM
+  trap '_global_cleanup' EXIT INT TERM
 
+  local entry
   local positional=()
 
   # 解析参数，支持 -m 出现在任意位置
@@ -1439,15 +1270,13 @@ main() {
       show_status
       while true; do
         show_menu
-        read -p "请输入选项 (0-${PROVIDER_COUNT}/v/m/q/↵): " choice
+        read -r -p "请输入选项 (0-${PROVIDER_COUNT}/v/m/q/↵): " choice
         case "$choice" in
           0)
             run_speed_test
             ;;
           [1-9]|[1-9][0-9])
-            _cleanup_bg_test
             if [[ -z "$CUSTOM_MODEL" && -t 0 ]]; then
-              local entry
               entry=$(_find_provider "$choice") || {
                 _gum_log error "无效的选项 $choice"
                 continue
@@ -1459,7 +1288,7 @@ main() {
             break
             ;;
           v|verify)
-            read -p "验证哪个供应商编号 (↵=全部): " vnum
+            read -r -p "验证哪个供应商编号 (↵=全部): " vnum
             if [[ -z "$vnum" ]]; then
               for entry in "${PROVIDERS[@]}"; do
                 _parse_provider "$entry"
@@ -1470,7 +1299,7 @@ main() {
             fi
             ;;
           m|models)
-            read -p "查询哪个供应商编号 (↵=全部): " mnum
+            read -r -p "查询哪个供应商编号 (↵=全部): " mnum
             run_list_models "$mnum"
             ;;
           e|edit|edit-key)
@@ -1494,7 +1323,6 @@ main() {
                 # 设置 CUSTOM_MODEL 为当前模型，这样 generate_config 会使用它
                 CUSTOM_MODEL="$current_model"
                 _gum_log info "使用当前供应商：$current_num (模型：$current_model)"
-                _cleanup_bg_test
                 switch_provider "$current_num"
                 break
               else

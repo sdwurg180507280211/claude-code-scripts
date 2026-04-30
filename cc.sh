@@ -112,9 +112,6 @@ _reload_providers() {
       [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
       PROVIDERS+=("$line")
     done < "$API_KEYS_CONF"
-  else
-    echo "错误: 配置文件不存在: $API_KEYS_CONF" >&2
-    exit 1
   fi
   PROVIDER_COUNT=${#PROVIDERS[@]}
 }
@@ -1215,6 +1212,80 @@ show_help() {
   echo "  ~/cc.sh 9 -m gpt-5.4             # 使用供应商 9，指定 GPT-5.4 模型"
   echo ""
 }
+
+# ── 首次运行引导 ──
+_first_run_setup() {
+  echo ""
+  printf "%b  欢迎使用 Claude Code 供应商切换脚本%b\n" "$CYAN" "$NC"
+  echo ""
+  _gum_log warn "未检测到供应商配置"
+  echo ""
+
+  # 步骤 1：供应商名称
+  printf "%b  [步骤 1/3] 设置供应商%b\n" "$GREEN" "$NC"
+  echo "  常见供应商：OpenAI、Anthropic、火山方舟、DeepSeek、通义千问等"
+  echo ""
+  local num name url token model haiku sonnet small options line
+  num="1"
+
+  _read_or_quit name "  供应商名称: " || { echo "退出"; exit 1; }
+  if [[ -z "$name" ]]; then
+    _gum_log error "供应商名称不能为空"
+    exit 1
+  fi
+
+  # 步骤 2：API 配置
+  echo ""
+  printf "%b  [步骤 2/3] 配置 API%b\n" "$GREEN" "$NC"
+  echo "  请输入供应商的 API 地址和密钥"
+  echo ""
+  _read_or_quit url "  API URL (如 https://api.openai.com/v1): " || { echo "退出"; exit 1; }
+  if [[ -z "$url" ]]; then
+    _gum_log error "API URL 不能为空"
+    exit 1
+  fi
+  _read_or_quit token "  API Key: " silent || { echo "退出"; exit 1; }
+  if [[ -z "$token" ]]; then
+    _gum_log error "API Key 不能为空"
+    exit 1
+  fi
+
+  # 步骤 3：模型配置
+  echo ""
+  printf "%b  [步骤 3/3] 配置模型%b\n" "$GREEN" "$NC"
+  echo "  输入默认使用的模型名称，其他模型角色可留空使用默认模型"
+  echo ""
+  _read_or_quit model "  默认模型 (如 gpt-4o, claude-sonnet-4-20250514): " || { echo "退出"; exit 1; }
+  if [[ -z "$model" ]]; then
+    _gum_log error "默认模型不能为空"
+    exit 1
+  fi
+
+  _read_or_quit haiku "  Haiku 模型 [回车=默认模型]: " || { echo "退出"; exit 1; }
+  _read_or_quit sonnet "  Sonnet 模型 [回车=默认模型]: " || { echo "退出"; exit 1; }
+  _read_or_quit small "  Small fast 模型 [回车=默认模型]: " || { echo "退出"; exit 1; }
+  _read_or_quit options "  可选模型列表 [回车=默认模型]: " || { echo "退出"; exit 1; }
+  options="${options:-$model}"
+
+  # 写入配置
+  line=$(_build_provider_line "$num" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$small" "$options")
+  _append_provider_line "$line" || {
+    _gum_log error "配置写入失败，请手动创建 ${API_KEYS_CONF}"
+    exit 1
+  }
+
+  _reload_providers
+  echo ""
+  _gum_log info "初始配置完成！供应商 [$num] $name 已就绪"
+  echo ""
+  _gum_log info "后续可通过菜单 c) 配置管理 添加更多供应商或修改模型"
+  echo ""
+}
+
+# 首次运行检测：配置文件不存在或无有效供应商
+if [[ ! -f "$API_KEYS_CONF" ]] || [[ ${#PROVIDERS[@]} -eq 0 ]]; then
+  _first_run_setup
+fi
 
 # ── 主函数 ──
 main() {

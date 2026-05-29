@@ -23,12 +23,49 @@ DIM='\033[2m'
 NC='\033[0m'
 
 # 依赖检查
-for cmd in python3; do
-  command -v "$cmd" &>/dev/null || {
-    echo "错误: 需要安装 $cmd" >&2
+_run_as_root() {
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    "$@"
+  elif command -v sudo &>/dev/null; then
+    sudo "$@"
+  else
+    echo "错误: 需要 root 权限安装 python3，但未找到 sudo" >&2
+    return 1
+  fi
+}
+
+_install_python3() {
+  echo "未检测到 python3，正在尝试自动安装..." >&2
+
+  if command -v brew &>/dev/null; then
+    brew install python
+  elif command -v apt-get &>/dev/null; then
+    _run_as_root apt-get update && _run_as_root apt-get install -y python3
+  elif command -v dnf &>/dev/null; then
+    _run_as_root dnf install -y python3
+  elif command -v yum &>/dev/null; then
+    _run_as_root yum install -y python3
+  elif command -v pacman &>/dev/null; then
+    _run_as_root pacman -Sy --noconfirm python
+  elif command -v apk &>/dev/null; then
+    _run_as_root apk add python3
+  else
+    echo "错误: 未找到支持的包管理器，请手动安装 Python 3.6+" >&2
+    return 1
+  fi
+}
+
+if ! command -v python3 &>/dev/null; then
+  _install_python3 || {
+    echo "错误: python3 自动安装失败，请手动安装 Python 3.6+" >&2
     exit 1
   }
-done
+fi
+
+if ! command -v python3 &>/dev/null; then
+  echo "错误: 已尝试安装，但仍未找到 python3" >&2
+  exit 1
+fi
 
 # Python 版本检查 (需要 3.6+)
 if ! python3 -c "import sys; assert sys.version_info >= (3, 6)" 2>/dev/null; then
@@ -56,8 +93,9 @@ trap _global_cleanup EXIT INT TERM
 mkdir -p "$BACKUP_DIR"
 
 # ── 供应商数据 (唯一数据源) ──
-# 格式: 编号|名称|URL|Token|默认模型|haiku模型|sonnet模型|small_fast模型|可选模型列表
-# haiku/sonnet/small_fast 留空则与默认模型相同
+# 格式: 编号|名称|URL|Token|默认模型|haiku模型|sonnet模型|opus模型|small_fast模型|可选模型列表
+# haiku/sonnet/opus/small_fast 留空则与默认模型相同
+# 兼容旧格式: 编号|名称|URL|Token|默认模型|haiku模型|sonnet模型|small_fast模型|可选模型列表
 # 可选模型列表用逗号分隔，单项格式：模型[:说明]
 
 # 配置文件路径
@@ -87,9 +125,28 @@ CUSTOM_MODEL=""
 # ── 从数组解析供应商字段 ──
 _parse_provider() {
   local entry="$1"
-  IFS='|' read -r P_NUM P_NAME P_URL P_TOKEN P_MODEL P_HAIKU P_SONNET P_SMALL P_MODEL_OPTIONS <<< "$entry"
+  local parts=()
+  IFS='|' read -r -a parts <<< "${entry}|__CC_END__"
+  unset 'parts[${#parts[@]}-1]'
+  P_NUM="${parts[0]:-}"
+  P_NAME="${parts[1]:-}"
+  P_URL="${parts[2]:-}"
+  P_TOKEN="${parts[3]:-}"
+  P_MODEL="${parts[4]:-}"
+  P_HAIKU="${parts[5]:-}"
+  P_SONNET="${parts[6]:-}"
+  if [[ ${#parts[@]} -ge 10 ]]; then
+    P_OPUS="${parts[7]:-}"
+    P_SMALL="${parts[8]:-}"
+    P_MODEL_OPTIONS="${parts[9]:-}"
+  else
+    P_OPUS=""
+    P_SMALL="${parts[7]:-}"
+    P_MODEL_OPTIONS="${parts[8]:-}"
+  fi
   P_HAIKU="${P_HAIKU:-$P_MODEL}"
   P_SONNET="${P_SONNET:-$P_MODEL}"
+  P_OPUS="${P_OPUS:-$P_MODEL}"
   P_SMALL="${P_SMALL:-$P_MODEL}"
   P_MODEL_OPTIONS="${P_MODEL_OPTIONS:-$P_MODEL}"
 }
@@ -158,11 +215,13 @@ generate_config() {
   local model="${CUSTOM_MODEL:-$P_MODEL}"
   local haiku_model="$P_HAIKU"
   local sonnet_model="$P_SONNET"
+  local opus_model="$P_OPUS"
   local small_fast_model="$P_SMALL"
 
   if [[ -n "$CUSTOM_MODEL" ]]; then
     haiku_model="$CUSTOM_MODEL"
     sonnet_model="$CUSTOM_MODEL"
+    opus_model="$CUSTOM_MODEL"
     small_fast_model="$CUSTOM_MODEL"
   fi
 
@@ -171,7 +230,7 @@ generate_config() {
   ANTHROPIC_MODEL="$model" \
   ANTHROPIC_DEFAULT_HAIKU_MODEL="$haiku_model" \
   ANTHROPIC_DEFAULT_SONNET_MODEL="$sonnet_model" \
-  ANTHROPIC_DEFAULT_OPUS_MODEL="$model" \
+  ANTHROPIC_DEFAULT_OPUS_MODEL="$opus_model" \
   ANTHROPIC_SMALL_FAST_MODEL="$small_fast_model" \
   python3 -c '
 import json
@@ -568,7 +627,25 @@ PY
 # ── 供应商 / 模型管理 ──
 _parse_provider_raw() {
   local entry="$1"
-  IFS='|' read -r R_NUM R_NAME R_URL R_TOKEN R_MODEL R_HAIKU R_SONNET R_SMALL R_MODEL_OPTIONS <<< "$entry"
+  local parts=()
+  IFS='|' read -r -a parts <<< "${entry}|__CC_END__"
+  unset 'parts[${#parts[@]}-1]'
+  R_NUM="${parts[0]:-}"
+  R_NAME="${parts[1]:-}"
+  R_URL="${parts[2]:-}"
+  R_TOKEN="${parts[3]:-}"
+  R_MODEL="${parts[4]:-}"
+  R_HAIKU="${parts[5]:-}"
+  R_SONNET="${parts[6]:-}"
+  if [[ ${#parts[@]} -ge 10 ]]; then
+    R_OPUS="${parts[7]:-}"
+    R_SMALL="${parts[8]:-}"
+    R_MODEL_OPTIONS="${parts[9]:-}"
+  else
+    R_OPUS=""
+    R_SMALL="${parts[7]:-}"
+    R_MODEL_OPTIONS="${parts[8]:-}"
+  fi
 }
 
 _validate_number() {
@@ -627,7 +704,7 @@ _validate_model_options() {
 }
 
 _build_provider_line() {
-  printf "%s|%s|%s|%s|%s|%s|%s|%s|%s" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
+  printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
 }
 
 _model_item() {
@@ -821,7 +898,7 @@ list_providers() {
 }
 
 provider_add() {
-  local suggested num name url token model haiku sonnet small options line
+  local suggested num name url token model haiku sonnet opus small options line
   suggested=$(_next_provider_num)
 
   printf "%b新增供应商%b\n\n" "$CYAN" "$NC"
@@ -839,6 +916,7 @@ provider_add() {
   _read_or_quit model "默认模型 (q 返回): " || return 1
   _read_or_quit haiku "Haiku 模型 [回车=默认模型] (q 返回): " || return 1
   _read_or_quit sonnet "Sonnet 模型 [回车=默认模型] (q 返回): " || return 1
+  _read_or_quit opus "Opus 模型 [回车=默认模型] (q 返回): " || return 1
   _read_or_quit small "Small fast 模型 [回车=默认模型] (q 返回): " || return 1
   _read_or_quit options "可选模型列表 [回车=默认模型] (q 返回): " || return 1
   options="${options:-$model}"
@@ -849,16 +927,17 @@ provider_add() {
   _validate_required_field "默认模型" "$model" || return 1
   _validate_conf_field "Haiku 模型" "$haiku" || return 1
   _validate_conf_field "Sonnet 模型" "$sonnet" || return 1
+  _validate_conf_field "Opus 模型" "$opus" || return 1
   _validate_conf_field "Small fast 模型" "$small" || return 1
   _validate_model_options "可选模型列表" "$options" "$model" || return 1
 
-  line=$(_build_provider_line "$num" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$small" "$options")
+  line=$(_build_provider_line "$num" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$opus" "$small" "$options")
   _append_provider_line "$line" || return 1
   _gum_log info "供应商已新增：[$num] $name"
 }
 
 provider_edit() {
-  local num entry name url token model haiku sonnet small options line
+  local num entry name url token model haiku sonnet opus small options line
   _prompt_provider_num "请输入要修改的供应商编号: " "${1:-}" || return 1
   num="$PROVIDER_NUM_INPUT"
   entry=$(_find_provider "$num") || { _gum_log error "无效的供应商编号"; return 1; }
@@ -875,6 +954,7 @@ provider_edit() {
   _prompt_keep "默认模型" "$R_MODEL" "必填" || return 1; model="$PROMPT_VALUE"
   _prompt_keep "Haiku 模型" "$R_HAIKU" "空=默认模型" || return 1; haiku="$PROMPT_VALUE"
   _prompt_keep "Sonnet 模型" "$R_SONNET" "空=默认模型" || return 1; sonnet="$PROMPT_VALUE"
+  _prompt_keep "Opus 模型" "$R_OPUS" "空=默认模型" || return 1; opus="$PROMPT_VALUE"
   _prompt_keep "Small fast 模型" "$R_SMALL" "空=默认模型" || return 1; small="$PROMPT_VALUE"
   _prompt_keep "可选模型列表" "$R_MODEL_OPTIONS" "空=默认模型" || return 1; options="$PROMPT_VALUE"
 
@@ -884,10 +964,11 @@ provider_edit() {
   _validate_required_field "默认模型" "$model" || return 1
   _validate_conf_field "Haiku 模型" "$haiku" || return 1
   _validate_conf_field "Sonnet 模型" "$sonnet" || return 1
+  _validate_conf_field "Opus 模型" "$opus" || return 1
   _validate_conf_field "Small fast 模型" "$small" || return 1
   _validate_model_options "可选模型列表" "$options" "$model" || return 1
 
-  line=$(_build_provider_line "$R_NUM" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$small" "$options")
+  line=$(_build_provider_line "$R_NUM" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$opus" "$small" "$options")
   _replace_provider_line "$num" "$line" || return 1
   _gum_log info "供应商已更新：[$num] $name"
 }
@@ -930,7 +1011,7 @@ _update_provider_model_options() {
   local num="$1" options="$2" entry line
   entry=$(_find_provider "$num") || { _gum_log error "无效的供应商编号"; return 1; }
   _parse_provider_raw "$entry"
-  line=$(_build_provider_line "$R_NUM" "$R_NAME" "$R_URL" "$R_TOKEN" "$R_MODEL" "$R_HAIKU" "$R_SONNET" "$R_SMALL" "$options")
+  line=$(_build_provider_line "$R_NUM" "$R_NAME" "$R_URL" "$R_TOKEN" "$R_MODEL" "$R_HAIKU" "$R_SONNET" "$R_OPUS" "$R_SMALL" "$options")
   _replace_provider_line "$num" "$line"
 }
 

@@ -125,10 +125,33 @@ create_agent() {
         exit 1
     fi
 
-    # 解析供应商数据
-    # 格式: 编号|名称|URL|Token|模型|...
-    local v_num v_name v_url v_token v_model
-    IFS='|' read -r v_num v_name v_url v_token v_model _ <<< "$vendor_line"
+    # 格式: 编号|名称|URL|Token|默认模型|haiku模型|sonnet模型|opus模型|small_fast模型|可选模型列表
+    # 兼容旧格式: 编号|名称|URL|Token|默认模型|haiku模型|sonnet模型|small_fast模型|可选模型列表
+    local v_num v_name v_url v_token v_model v_haiku v_sonnet v_opus v_small v_options
+    local parts=()
+    IFS='|' read -r -a parts <<< "${vendor_line}|__CC_END__"
+    unset 'parts[${#parts[@]}-1]'
+    v_num="${parts[0]:-}"
+    v_name="${parts[1]:-}"
+    v_url="${parts[2]:-}"
+    v_token="${parts[3]:-}"
+    v_model="${parts[4]:-}"
+    v_haiku="${parts[5]:-}"
+    v_sonnet="${parts[6]:-}"
+    if [[ ${#parts[@]} -ge 10 ]]; then
+      v_opus="${parts[7]:-}"
+      v_small="${parts[8]:-}"
+      v_options="${parts[9]:-}"
+    else
+      v_opus=""
+      v_small="${parts[7]:-}"
+      v_options="${parts[8]:-}"
+    fi
+    v_haiku="${v_haiku:-$v_model}"
+    v_sonnet="${v_sonnet:-$v_model}"
+    v_opus="${v_opus:-$v_model}"
+    v_small="${v_small:-$v_model}"
+    v_options="${v_options:-$v_model}"
 
     # 使用自定义模型或默认模型
     local final_model="${custom_model:-$v_model}"
@@ -143,7 +166,12 @@ create_agent() {
     "name": "$v_name",
     "url": "$v_url",
     "token": "$v_token",
-    "default_model": "$v_model"
+    "default_model": "$v_model",
+    "haiku_model": "$v_haiku",
+    "sonnet_model": "$v_sonnet",
+    "opus_model": "$v_opus",
+    "small_fast_model": "$v_small",
+    "model_options": "$v_options"
   },
   "model": "$final_model",
   "created_at": "$(date -Iseconds)",
@@ -190,10 +218,10 @@ settings = {
         "ANTHROPIC_BASE_URL": vendor["url"],
         "ANTHROPIC_AUTH_TOKEN": vendor["token"],
         "ANTHROPIC_MODEL": model,
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": vendor.get("default_model", model),
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": vendor.get("default_model", model),
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
-        "ANTHROPIC_SMALL_FAST_MODEL": vendor.get("default_model", model),
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": vendor.get("haiku_model", vendor.get("default_model", model)),
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": vendor.get("sonnet_model", vendor.get("default_model", model)),
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": vendor.get("opus_model", model),
+        "ANTHROPIC_SMALL_FAST_MODEL": vendor.get("small_fast_model", vendor.get("default_model", model)),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
     },
     "model": model.split('-')[0] if model.startswith('claude-') else "claude",

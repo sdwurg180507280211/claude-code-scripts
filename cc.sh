@@ -206,6 +206,16 @@ _read_or_quit() {
   printf -v "$var_name" "%s" "$input_value"
 }
 
+_prompt_required() {
+  local var_name="$1" label="$2" prompt="$3" silent="${4:-}" value
+  while true; do
+    _read_or_quit value "$prompt" "$silent" || return 1
+    _validate_required_field "$label" "$value" || { echo ""; continue; }
+    printf -v "$var_name" "%s" "$value"
+    return 0
+  done
+}
+
 # ── 生成 settings.json ──
 generate_config() {
   _parse_provider "$1"
@@ -564,6 +574,7 @@ edit_provider_token() {
   echo " 当前供应商: $P_NAME"
   echo " 当前 API Key: $(_mask_token "$P_TOKEN")"
   echo ""
+  _gum_log warn "API Key 输入为明文显示，方便粘贴检查。"
   _read_or_quit new_token "请输入新的 API Key（q 返回）: " || return 1
 
   _validate_required_field "API Key" "$new_token" || {
@@ -899,34 +910,61 @@ provider_add() {
   suggested=$(_next_provider_num)
 
   printf "%b新增供应商%b\n\n" "$CYAN" "$NC"
-  _read_or_quit num "供应商编号 [${suggested}] (q 返回): " || return 1
-  num="${num:-$suggested}"
-  _validate_number "供应商编号" "$num" || return 1
-  if _provider_num_exists "$num"; then
-    _gum_log error "供应商编号 ${num} 已存在"
-    return 1
+  while true; do
+    _read_or_quit num "供应商编号 [${suggested}] (q 返回): " || return 1
+    if [[ -z "$num" ]]; then
+      num="$suggested"
+    elif [[ ! "$num" =~ ^[0-9]+$ ]]; then
+      name="$num"
+      num="$suggested"
+      _gum_log warn "已使用默认编号 ${num}，并把输入内容作为供应商名称"
+    fi
+
+    _validate_number "供应商编号" "$num" || { echo ""; continue; }
+    if _provider_num_exists "$num"; then
+      _gum_log error "供应商编号 ${num} 已存在，请换一个编号或直接回车使用建议编号"
+      echo ""
+      continue
+    fi
+    break
+  done
+
+  if [[ -n "$name" ]]; then
+    _validate_required_field "供应商名称" "$name" || return 1
+  else
+    _prompt_required name "供应商名称" "供应商名称 (q 返回): " || return 1
   fi
+  _prompt_required url "API URL" "API URL (q 返回): " || return 1
+  _gum_log warn "API Key 输入为明文显示，方便粘贴检查。"
+  _prompt_required token "API Key" "API Key (q 返回): " || return 1
+  _prompt_required model "默认模型" "默认模型 (q 返回): " || return 1
 
-  _read_or_quit name "供应商名称 (q 返回): " || return 1
-  _read_or_quit url "API URL (q 返回): " || return 1
-  _read_or_quit token "API Key (q 返回): " silent || return 1
-  _read_or_quit model "默认模型 (q 返回): " || return 1
-  _read_or_quit haiku "Haiku 模型 [回车=默认模型] (q 返回): " || return 1
-  _read_or_quit sonnet "Sonnet 模型 [回车=默认模型] (q 返回): " || return 1
-  _read_or_quit opus "Opus 模型 [回车=默认模型] (q 返回): " || return 1
-  _read_or_quit small "Small fast 模型 [回车=默认模型] (q 返回): " || return 1
-  _read_or_quit options "可选模型列表 [回车=默认模型] (q 返回): " || return 1
-  options="${options:-$model}"
-
-  _validate_required_field "供应商名称" "$name" || return 1
-  _validate_required_field "API URL" "$url" || return 1
-  _validate_required_field "API Key" "$token" || return 1
-  _validate_required_field "默认模型" "$model" || return 1
-  _validate_conf_field "Haiku 模型" "$haiku" || return 1
-  _validate_conf_field "Sonnet 模型" "$sonnet" || return 1
-  _validate_conf_field "Opus 模型" "$opus" || return 1
-  _validate_conf_field "Small fast 模型" "$small" || return 1
-  _validate_model_options "可选模型列表" "$options" "$model" || return 1
+  while true; do
+    _read_or_quit haiku "Haiku 模型 [回车=默认模型] (q 返回): " || return 1
+    _validate_conf_field "Haiku 模型" "$haiku" || { echo ""; continue; }
+    break
+  done
+  while true; do
+    _read_or_quit sonnet "Sonnet 模型 [回车=默认模型] (q 返回): " || return 1
+    _validate_conf_field "Sonnet 模型" "$sonnet" || { echo ""; continue; }
+    break
+  done
+  while true; do
+    _read_or_quit opus "Opus 模型 [回车=默认模型] (q 返回): " || return 1
+    _validate_conf_field "Opus 模型" "$opus" || { echo ""; continue; }
+    break
+  done
+  while true; do
+    _read_or_quit small "Small fast 模型 [回车=默认模型] (q 返回): " || return 1
+    _validate_conf_field "Small fast 模型" "$small" || { echo ""; continue; }
+    break
+  done
+  while true; do
+    _read_or_quit options "可选模型列表 [回车=默认模型] (q 返回): " || return 1
+    options="${options:-$model}"
+    _validate_model_options "可选模型列表" "$options" "$model" || { echo ""; continue; }
+    break
+  done
 
   line=$(_build_provider_line "$num" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$opus" "$small" "$options")
   _append_provider_line "$line" || return 1
@@ -946,7 +984,8 @@ provider_edit() {
 
   _prompt_keep "供应商名称" "$R_NAME" "必填" || return 1; name="$PROMPT_VALUE"
   _prompt_keep "API URL" "$R_URL" "必填" || return 1; url="$PROMPT_VALUE"
-  _read_or_quit token "API Key [$(_mask_token "$R_TOKEN")，回车保留] (q 返回): " silent || return 1
+  _gum_log warn "API Key 输入为明文显示，方便粘贴检查；直接回车保留原值。"
+  _read_or_quit token "API Key [$(_mask_token "$R_TOKEN")，回车保留] (q 返回): " || return 1
   token="${token:-$R_TOKEN}"
   _prompt_keep "默认模型" "$R_MODEL" "必填" || return 1; model="$PROMPT_VALUE"
   _prompt_keep "Haiku 模型" "$R_HAIKU" "空=默认模型" || return 1; haiku="$PROMPT_VALUE"
@@ -1225,7 +1264,7 @@ _first_run_setup() {
   printf "%b  [步骤 1/3] 设置供应商%b\n" "$GREEN" "$NC"
   echo "  常见供应商：OpenAI、Anthropic、火山方舟、DeepSeek、通义千问等"
   echo ""
-  local num name url token model haiku sonnet small options line
+  local num name url token model haiku sonnet opus small options line
   num="1"
 
   _read_or_quit name "  供应商名称: " || { echo "退出"; exit 1; }
@@ -1263,12 +1302,13 @@ _first_run_setup() {
 
   _read_or_quit haiku "  Haiku 模型 [回车=默认模型]: " || { echo "退出"; exit 1; }
   _read_or_quit sonnet "  Sonnet 模型 [回车=默认模型]: " || { echo "退出"; exit 1; }
+  _read_or_quit opus "  Opus 模型 [回车=默认模型]: " || { echo "退出"; exit 1; }
   _read_or_quit small "  Small fast 模型 [回车=默认模型]: " || { echo "退出"; exit 1; }
   _read_or_quit options "  可选模型列表 [回车=默认模型]: " || { echo "退出"; exit 1; }
   options="${options:-$model}"
 
   # 写入配置
-  line=$(_build_provider_line "$num" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$small" "$options")
+  line=$(_build_provider_line "$num" "$name" "$url" "$token" "$model" "$haiku" "$sonnet" "$opus" "$small" "$options")
   _append_provider_line "$line" || {
     _gum_log error "配置写入失败，请手动创建 ${API_KEYS_CONF}"
     exit 1
